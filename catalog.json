@@ -1,0 +1,12 @@
+{
+  "catalogs": {
+    "bmya-mcp-catalog": {
+      "displayName": "BMyA MCP Catalog"
+    },
+    "docker-mcp": {
+      "displayName": "Docker MCP Catalog",
+      "url": "https://desktop.docker.com/mcp/catalog/v2/catalog.yaml",
+      "lastUpdate": "2025-11-08T10:12:59-03:00"
+    }
+  }
+}
