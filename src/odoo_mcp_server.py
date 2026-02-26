@@ -155,13 +155,17 @@ class OdooClient:
         return self._make_request(model, "search_read", payload)
 
     def create(self, model: str, values: dict) -> int:
-        """Create a new record"""
-        payload = {"values": values}
-        return self._make_request(model, "create", payload)
+        """Create a new record. Odoo 19 JSON-2 API expects vals_list (list of dicts)."""
+        payload = {"vals_list": [values]}
+        result = self._make_request(model, "create", payload)
+        # Returns a list of IDs; unwrap single element for convenience
+        if isinstance(result, list):
+            return result[0] if len(result) == 1 else result
+        return result
 
     def write(self, model: str, ids: list, values: dict) -> bool:
-        """Update existing records"""
-        payload = {"ids": ids, "values": values}
+        """Update existing records. Odoo 19 JSON-2 API expects 'vals', not 'values'."""
+        payload = {"ids": ids, "vals": values}
         return self._make_request(model, "write", payload)
 
     def unlink(self, model: str, ids: list) -> bool:
