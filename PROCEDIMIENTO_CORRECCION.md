@@ -89,7 +89,7 @@ git diff Dockerfile
 
 ```bash
 # Build de la imagen con correcciones
-docker build -t bmya/odoo-mcp-server:latest /Users/danielb/claude-odoo-api
+docker build -t bmya/odoo-mcp-server:latest /Users/danielb/ClaudeCodeProjects/claude-odoo-api
 
 # Output:
 # [+] Building 8.4s
@@ -116,7 +116,7 @@ docker run --rm bmya/odoo-mcp-server:latest python -c "import requests; import m
 # ✅ Módulos cargados correctamente
 
 # Test 2: Cargar configuración multi-company
-docker run --rm -v /Users/danielb/claude-odoo-api/.env:/app/.env:ro bmya/odoo-mcp-server:latest python -c "
+docker run --rm -v /Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env:/app/.env:ro bmya/odoo-mcp-server:latest python -c "
 import sys
 sys.path.insert(0, '/app/src')
 from odoo_mcp_server import load_company_configs

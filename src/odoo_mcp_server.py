@@ -34,6 +34,10 @@ CONFIG_FILE = os.getenv("ODOO_CONFIG_FILE", ".env")
 REQUEST_TIMEOUT = int(os.getenv("ODOO_REQUEST_TIMEOUT", "30"))
 MAX_RETRIES = int(os.getenv("ODOO_MAX_RETRIES", "3"))
 
+# Read-only kill-switch: when enabled, write operations (create/write/unlink)
+# are blocked without redeploying. Useful to protect production instances.
+READ_ONLY = os.getenv("ODOO_MCP_READONLY", "").lower() in ("1", "true", "yes")
+
 
 class OdooClient:
     """Client for interacting with Odoo JSON-2 API with retry logic and connection pooling"""
@@ -475,6 +479,77 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["company", "model"]
             }
+        ),
+        Tool(
+            name="odoo_list_models",
+            description="Discover available Odoo models (tables). Returns technical name and label. Use a filter to narrow results before querying with other tools.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "company": {
+                        "type": "string",
+                        "description": "The company configuration name to use"
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "Optional text to match against model technical name or label (case-insensitive). Omit to list all models."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of models to return (default 100)"
+                    }
+                },
+                "required": ["company"]
+            }
+        ),
+        Tool(
+            name="odoo_fields_get",
+            description="Introspect the fields of an Odoo model (name, label, type, relation, required, readonly). Use this to learn what fields exist before building a search or create.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "company": {
+                        "type": "string",
+                        "description": "The company configuration name to use"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "The Odoo model name to introspect (e.g., 'res.partner')"
+                    },
+                    "attributes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Field attributes to return from ir.model.fields. Defaults to name, field_description, ttype, relation, required, readonly."
+                    }
+                },
+                "required": ["company", "model"]
+            }
+        ),
+        Tool(
+            name="odoo_name_search",
+            description="Resolve records by name (e.g., find a partner or product without building a domain). Matches the 'name' field case-insensitively and returns id and display_name. For models without a 'name' field, use odoo_search_read instead.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "company": {
+                        "type": "string",
+                        "description": "The company configuration name to use"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "The Odoo model name to search (e.g., 'res.partner')"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Text to match against the record display name (case-insensitive)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return (default 10)"
+                    }
+                },
+                "required": ["company", "model", "name"]
+            }
         )
     ]
 
@@ -496,6 +571,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             raise ValueError("Company parameter is required")
 
         client = get_odoo_client(company)
+
+        # Read-only kill-switch: block write operations when enabled
+        if READ_ONLY and name in ("odoo_create", "odoo_write", "odoo_unlink"):
+            return [TextContent(
+                type="text",
+                text="Error: Server in read-only mode: write operations are disabled (ODOO_MCP_READONLY)"
+            )]
 
         if name == "odoo_search_read":
             result = client.search_read(
@@ -554,6 +636,43 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 domain=arguments.get("domain", [])
             )
             return [TextContent(type="text", text=f"Count: {result}")]
+
+        elif name == "odoo_list_models":
+            text_filter = arguments.get("filter")
+            domain = (
+                ["|", ["model", "ilike", text_filter], ["name", "ilike", text_filter]]
+                if text_filter else []
+            )
+            result = client.search_read(
+                model="ir.model",
+                domain=domain,
+                fields=["model", "name"],
+                limit=arguments.get("limit", 100),
+                order="model asc"
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "odoo_fields_get":
+            attributes = arguments.get("attributes") or [
+                "name", "field_description", "ttype",
+                "relation", "required", "readonly"
+            ]
+            result = client.search_read(
+                model="ir.model.fields",
+                domain=[["model", "=", arguments["model"]]],
+                fields=attributes,
+                order="name asc"
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "odoo_name_search":
+            result = client.search_read(
+                model=arguments["model"],
+                domain=[["name", "ilike", arguments["name"]]],
+                fields=["id", "display_name"],
+                limit=arguments.get("limit", 10)
+            )
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         else:
             raise ValueError(f"Unknown tool: {name}")

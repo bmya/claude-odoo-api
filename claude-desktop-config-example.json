@@ -7,7 +7,7 @@
         "--rm",
         "-i",
         "--env-file",
-        "/Users/danielb/claude-odoo-api/.env",
+        "/Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env",
         "odoo-mcp-server"
       ]
     }

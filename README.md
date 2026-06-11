@@ -88,6 +88,31 @@ Count records matching search criteria.
 - `model` (required): The Odoo model name
 - `domain` (optional): Search criteria
 
+### 9. `odoo_list_models`
+Discover available Odoo models (tables). Returns technical name and label.
+
+**Parameters:**
+- `company` (required): The company configuration name
+- `filter` (optional): Text matched against model technical name or label (case-insensitive)
+- `limit` (optional): Maximum number of models to return (default 100)
+
+### 10. `odoo_fields_get`
+Introspect the fields of a model (name, label, type, relation, required, readonly). Use it to learn what fields exist before building a search or create.
+
+**Parameters:**
+- `company` (required): The company configuration name
+- `model` (required): The Odoo model name to introspect
+- `attributes` (optional): Field attributes to return (defaults to name, field_description, ttype, relation, required, readonly)
+
+### 11. `odoo_name_search`
+Resolve records by name (e.g., find a partner or product without building a domain). Matches the `name` field case-insensitively and returns `id` and `display_name`. For models without a `name` field, use `odoo_search_read` instead.
+
+**Parameters:**
+- `company` (required): The company configuration name
+- `model` (required): The Odoo model name
+- `name` (required): Text to match against the record name
+- `limit` (optional): Maximum number of matches (default 10)
+
 ## Prerequisites
 
 - Python 3.10 or higher (for local development)
@@ -177,6 +202,19 @@ environment:
 - Lower `ODOO_REQUEST_TIMEOUT` for faster failure detection on bad connections
 - Increase `ODOO_MAX_RETRIES` for unreliable networks (max recommended: 5)
 - Retry uses exponential backoff: waits 1s, 2s, 4s between attempts
+
+### Read-Only Mode (Safety Kill-Switch)
+
+Set `ODOO_MCP_READONLY=1` (also accepts `true`/`yes`) to block all write
+operations (`odoo_create`, `odoo_write`, `odoo_unlink`) without redeploying the
+image. Read tools keep working. Useful to protect production instances when the
+server is exposed to a skill or plugin that should only query data.
+
+```yaml
+# docker-compose.yml
+environment:
+  - ODOO_MCP_READONLY=1
+```
 
 ## Installation & Usage
 

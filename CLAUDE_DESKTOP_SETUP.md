@@ -71,7 +71,7 @@ Agrega el servidor `odoo` dentro de la sección `mcpServers` existente:
         "--init",
         "-i",
         "--env-file",
-        "/Users/danielb/claude-odoo-api/.env",
+        "/Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env",
         "odoo-mcp-server"
       ]
     }
@@ -92,7 +92,7 @@ Agrega el servidor `odoo` dentro de la sección `mcpServers` existente:
         "--rm",
         "-i",
         "--env-file",
-        "/Users/danielb/claude-odoo-api/.env",
+        "/Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env",
         "odoo-mcp-server"
       ]
     }
@@ -100,7 +100,7 @@ Agrega el servidor `odoo` dentro de la sección `mcpServers` existente:
 }
 ```
 
-**IMPORTANTE:** Reemplaza `/Users/danielb/claude-odoo-api/.env` con la ruta absoluta a tu archivo `.env`.
+**IMPORTANTE:** Reemplaza `/Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env` con la ruta absoluta a tu archivo `.env`.
 
 ### Si tu Odoo está en localhost
 
@@ -127,7 +127,7 @@ O puedes usar la red del host:
         "--network",
         "host",
         "--env-file",
-        "/Users/danielb/claude-odoo-api/.env",
+        "/Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env",
         "odoo-mcp-server"
       ]
     }

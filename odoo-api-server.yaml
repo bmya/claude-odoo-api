@@ -3,7 +3,7 @@ servers:
     image: odoo-mcp-server
     transport: stdio
     volumes:
-      - /Users/danielb/claude-odoo-api/.env:/.env:ro
+      - /Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env:/.env:ro
     env:
       - ODOO_URL
       - ODOO_DB

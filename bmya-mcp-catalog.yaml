@@ -11,7 +11,7 @@ registry:
     image: bmya/odoo-mcp-server:latest
     ref: ""
     volumes:
-      - "/Users/danielb/claude-odoo-api/.env:/app/.env:ro"
+      - "/Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env:/app/.env:ro"
     metadata:
       category: business
       tags:

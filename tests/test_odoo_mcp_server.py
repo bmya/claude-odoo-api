@@ -293,7 +293,7 @@ class TestMCPToolIntegration:
 
         tools = await list_tools()
 
-        assert len(tools) == 8
+        assert len(tools) == 11
         tool_names = [tool.name for tool in tools]
 
         assert "odoo_list_companies" in tool_names
@@ -304,6 +304,9 @@ class TestMCPToolIntegration:
         assert "odoo_search" in tool_names
         assert "odoo_read" in tool_names
         assert "odoo_search_count" in tool_names
+        assert "odoo_list_models" in tool_names
+        assert "odoo_fields_get" in tool_names
+        assert "odoo_name_search" in tool_names
 
     @pytest.mark.asyncio
     async def test_call_list_companies(self, temp_env_file):
@@ -330,6 +333,113 @@ class TestMCPToolIntegration:
         assert len(result) == 1
         assert "Error" in result[0].text
         assert "Company parameter is required" in result[0].text
+
+
+class TestIntrospectionTools:
+    """Tests for the introspection and name_search tools"""
+
+    @pytest.fixture
+    def mock_client(self):
+        """Patch get_odoo_client to return a mock with a search_read spy"""
+        import odoo_mcp_server
+        client = Mock()
+        client.search_read = Mock(return_value=[])
+        with patch.object(odoo_mcp_server, "get_odoo_client", return_value=client):
+            yield client
+
+    @pytest.mark.asyncio
+    async def test_list_models_with_filter(self, mock_client):
+        from odoo_mcp_server import call_tool
+
+        await call_tool("odoo_list_models", {"company": "c", "filter": "partner"})
+
+        mock_client.search_read.assert_called_once()
+        kwargs = mock_client.search_read.call_args.kwargs
+        assert kwargs["model"] == "ir.model"
+        assert kwargs["domain"] == [
+            "|", ["model", "ilike", "partner"], ["name", "ilike", "partner"]
+        ]
+
+    @pytest.mark.asyncio
+    async def test_list_models_without_filter(self, mock_client):
+        from odoo_mcp_server import call_tool
+
+        await call_tool("odoo_list_models", {"company": "c"})
+
+        kwargs = mock_client.search_read.call_args.kwargs
+        assert kwargs["model"] == "ir.model"
+        assert kwargs["domain"] == []
+
+    @pytest.mark.asyncio
+    async def test_fields_get(self, mock_client):
+        from odoo_mcp_server import call_tool
+
+        await call_tool("odoo_fields_get", {"company": "c", "model": "res.partner"})
+
+        kwargs = mock_client.search_read.call_args.kwargs
+        assert kwargs["model"] == "ir.model.fields"
+        assert kwargs["domain"] == [["model", "=", "res.partner"]]
+        assert "ttype" in kwargs["fields"]
+
+    @pytest.mark.asyncio
+    async def test_name_search(self, mock_client):
+        from odoo_mcp_server import call_tool
+
+        await call_tool(
+            "odoo_name_search",
+            {"company": "c", "model": "res.partner", "name": "BMyA"}
+        )
+
+        kwargs = mock_client.search_read.call_args.kwargs
+        assert kwargs["model"] == "res.partner"
+        assert kwargs["domain"] == [["name", "ilike", "BMyA"]]
+        assert kwargs["limit"] == 10
+
+
+class TestReadOnlyKillSwitch:
+    """Tests for the ODOO_MCP_READONLY kill-switch"""
+
+    @pytest.fixture
+    def readonly_client(self):
+        """Enable read-only mode and patch the client; restore afterwards"""
+        import odoo_mcp_server
+        original = odoo_mcp_server.READ_ONLY
+        odoo_mcp_server.READ_ONLY = True
+        client = Mock()
+        client.create = Mock(return_value=1)
+        client.write = Mock(return_value=True)
+        client.unlink = Mock(return_value=True)
+        client.search_read = Mock(return_value=[])
+        with patch.object(odoo_mcp_server, "get_odoo_client", return_value=client):
+            yield client
+        odoo_mcp_server.READ_ONLY = original
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool,args", [
+        ("odoo_create", {"model": "res.partner", "values": {"name": "X"}}),
+        ("odoo_write", {"model": "res.partner", "ids": [1], "values": {"name": "X"}}),
+        ("odoo_unlink", {"model": "res.partner", "ids": [1]}),
+    ])
+    async def test_writes_blocked(self, readonly_client, tool, args):
+        from odoo_mcp_server import call_tool
+
+        result = await call_tool(tool, {"company": "c", **args})
+
+        assert "read-only mode" in result[0].text
+        readonly_client.create.assert_not_called()
+        readonly_client.write.assert_not_called()
+        readonly_client.unlink.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reads_allowed_in_readonly(self, readonly_client):
+        from odoo_mcp_server import call_tool
+
+        result = await call_tool(
+            "odoo_search_read", {"company": "c", "model": "res.partner"}
+        )
+
+        assert "read-only mode" not in result[0].text
+        readonly_client.search_read.assert_called_once()
 
 
 if __name__ == "__main__":

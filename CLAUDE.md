@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server that provides tools to interact with Odoo 19's External JSON-2 API. The server supports multiple company/instance configurations and exposes 8 tools for CRUD operations on Odoo databases: list_companies, search_read, create, write, unlink, search, read, and search_count.
+This is an MCP (Model Context Protocol) server that provides tools to interact with Odoo 19's External JSON-2 API. The server supports multiple company/instance configurations and exposes 11 tools on Odoo databases: list_companies, search_read, create, write, unlink, search, read, search_count, list_models, fields_get, and name_search.
+
+The introspection tools (`list_models`, `fields_get`) and `name_search` are implemented on top of the proven `search_read` endpoint over the meta-models `ir.model` / `ir.model.fields` — they do NOT use new endpoints, since `/json/2/{model}/call` returns 404 on these instances. Note: `name_search` filters on the `name` field (not `display_name`, which is a non-searchable computed field on this instance and is silently ignored by ilike).
+
+Write operations can be globally disabled with `ODOO_MCP_READONLY=1` (also `true`/`yes`) — a kill-switch to protect production without redeploying.
 
 ## 🔧 CRITICAL FIX HISTORY - 2025-12-23
 
@@ -67,7 +71,7 @@ docker run --rm bmya/odoo-mcp-server:latest python -c "import requests; import m
 
 **Test 2 - Carga de configuración multi-company:**
 ```bash
-docker run --rm -v /Users/danielb/claude-odoo-api/.env:/app/.env:ro bmya/odoo-mcp-server:latest python -c "..."
+docker run --rm -v /Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env:/app/.env:ro bmya/odoo-mcp-server:latest python -c "..."
 # Resultado: ✅ Loaded 2 companies: ['bmya', 'companycl']
 ```
 
