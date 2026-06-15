@@ -116,7 +116,11 @@ class TestOdooClient:
             )
 
             assert result == 42
-            mock_request.assert_called_once()
+            mock_request.assert_called_once_with(
+                "res.partner",
+                "create",
+                {"vals_list": {"name": "Test Partner", "email": "test@example.com"}}
+            )
 
     def test_write_record(self):
         """Test write method"""
@@ -136,6 +140,11 @@ class TestOdooClient:
             )
 
             assert result is True
+            mock_request.assert_called_once_with(
+                "res.partner",
+                "write",
+                {"ids": [1, 2], "vals": {"phone": "555-1234"}}
+            )
 
     def test_unlink_record(self):
         """Test unlink method"""

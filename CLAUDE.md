@@ -106,6 +106,32 @@ docker mcp server list
 - `add_mcp_server.md` (untracked)
 - `.gemini-clipboard/` (untracked)
 
+## 🩺 TROUBLESHOOTING - "Server disconnected" tras reiniciar/actualizar Docker
+
+**Síntoma:** En "Servidores MCP locales" de la app de Claude, `odoo-api` (y normalmente
+también `MCP_DOCKER`) aparecen como **failed / Server disconnected**.
+
+**Causa:** No es un bug de la imagen ni de `claude_desktop_config.json`. Cuando el daemon
+de Docker Desktop se reinicia (p. ej. al actualizar Docker), todo proceso `docker run -i`
+adjunto por stdio queda cortado. En los logs (`~/Library/Logs/Claude/mcp-server-odoo-api.log`)
+se ve `error waiting for container: unexpected EOF` y la desconexión simultánea de todos
+los servidores MCP basados en Docker. La app no relanza el contenedor automáticamente, así
+que queda pegado en "failed".
+
+**Remediación:** Con Docker Desktop totalmente arrancado (`docker info` responde),
+deshabilitar y volver a habilitar `odoo-api` en la app (o reiniciar la app).
+
+**Verificar la imagen aparte (debe responder limpio en stdout):**
+```bash
+docker run --rm bmya/odoo-mcp-server:latest python -c "import requests, mcp; print('OK')"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
+ | docker run --rm -i -v /Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env:/app/.env:ro \
+   -e ODOO_CONFIG_FILE=/app/.env bmya/odoo-mcp-server:latest 2>/dev/null
+```
+
+**Nota:** Esta caída es inherente a cualquier MCP stdio lanzado vía `docker run -i`; un
+reinicio del daemon siempre lo corta. Ningún cambio de config lo evita.
+
 ## Architecture
 
 ### Core Components

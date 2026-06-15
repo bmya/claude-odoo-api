@@ -101,7 +101,7 @@ for json_libredte in libre_dte_list:
     response = requests.post(
         "http://localhost:8069/json/2/account.move/create",
         headers=headers,
-        json={"values": move_vals}
+        json={"vals_list": move_vals}
     )
     response.raise_for_status()
     created_id = response.json()

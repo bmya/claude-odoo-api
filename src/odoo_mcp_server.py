@@ -160,12 +160,12 @@ class OdooClient:
 
     def create(self, model: str, values: dict) -> int:
         """Create a new record"""
-        payload = {"values": values}
+        payload = {"vals_list": values}
         return self._make_request(model, "create", payload)
 
     def write(self, model: str, ids: list, values: dict) -> bool:
         """Update existing records"""
-        payload = {"ids": ids, "values": values}
+        payload = {"ids": ids, "vals": values}
         return self._make_request(model, "write", payload)
 
     def unlink(self, model: str, ids: list) -> bool:
