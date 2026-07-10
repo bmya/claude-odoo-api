@@ -38,6 +38,19 @@ MAX_RETRIES = int(os.getenv("ODOO_MAX_RETRIES", "3"))
 # are blocked without redeploying. Useful to protect production instances.
 READ_ONLY = os.getenv("ODOO_MCP_READONLY", "").lower() in ("1", "true", "yes")
 
+# Allowlist of Odoo business methods that odoo_call_method may invoke.
+# Configurable via ODOO_MCP_ALLOWED_METHODS ("model.method,model.method").
+DEFAULT_ALLOWED_METHODS = [
+    "calendar.event.action_sync_timesheets",
+    "account.move.action_post",
+    "sale.order.action_confirm",
+]
+ODOO_ALLOWED_METHODS = {
+    m.strip()
+    for m in os.getenv("ODOO_MCP_ALLOWED_METHODS", ",".join(DEFAULT_ALLOWED_METHODS)).split(",")
+    if m.strip()
+}
+
 
 class OdooClient:
     """Client for interacting with Odoo JSON-2 API with retry logic and connection pooling"""
@@ -208,6 +221,29 @@ class OdooClient:
         """Count records matching domain"""
         payload = {"domain": domain}
         return self._make_request(model, "search_count", payload)
+
+    def call_method(
+        self,
+        model: str,
+        method: str,
+        ids: Optional[list] = None,
+        kwargs: Optional[dict] = None
+    ) -> Any:
+        """Invoke an Odoo business method via /json/2/{model}/{method}."""
+        payload = {**(kwargs or {})}
+        if ids:
+            payload["ids"] = ids
+        return self._make_request(model, method, payload)
+
+
+def _format_call_method_result(result: Any) -> str:
+    """Render a business-method result: readable notification message if present,
+    otherwise the raw JSON (handles ir.actions.client dicts, bool and None)."""
+    if isinstance(result, dict):
+        message = result.get("params", {}).get("message")
+        if message:
+            return message
+    return json.dumps(result, indent=2, default=str)
 
 
 # Initialize the MCP server
@@ -555,6 +591,43 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["company", "model", "name"]
             }
+        ),
+        Tool(
+            name="odoo_call_method",
+            description=(
+                "Invoke an Odoo business method (workflow action) on a model, e.g. post an "
+                "invoice or confirm a sale order. For safety, only methods present in the "
+                "allowlist are accepted (configure it with the ODOO_MCP_ALLOWED_METHODS env "
+                "var, comma-separated 'model.method' pairs). Counts as a write operation, so "
+                "it is blocked when ODOO_MCP_READONLY is enabled."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "company": {
+                        "type": "string",
+                        "description": "The company configuration name to use"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "The Odoo model name (e.g., 'account.move', 'sale.order')"
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "The business method to call (e.g., 'action_post', 'action_confirm')"
+                    },
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Optional list of record IDs the method operates on"
+                    },
+                    "kwargs": {
+                        "type": "object",
+                        "description": "Optional keyword arguments to pass to the method"
+                    }
+                },
+                "required": ["company", "model", "method"]
+            }
         )
     ]
 
@@ -578,7 +651,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         client = get_odoo_client(company)
 
         # Read-only kill-switch: block write operations when enabled
-        if READ_ONLY and name in ("odoo_create", "odoo_write", "odoo_unlink"):
+        if READ_ONLY and name in ("odoo_create", "odoo_write", "odoo_unlink", "odoo_call_method"):
             return [TextContent(
                 type="text",
                 text="Error: Server in read-only mode: write operations are disabled (ODOO_MCP_READONLY)"
@@ -680,6 +753,25 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 limit=arguments.get("limit", 10)
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "odoo_call_method":
+            model = arguments["model"]
+            method = arguments["method"]
+            key = f"{model}.{method}"
+            if key not in ODOO_ALLOWED_METHODS:
+                allowed = ", ".join(sorted(ODOO_ALLOWED_METHODS)) or "(none)"
+                return [TextContent(type="text", text=(
+                    f"Error: Method '{key}' is not allowed. To enable it, add it to the "
+                    f"ODOO_MCP_ALLOWED_METHODS env var (comma-separated 'model.method' pairs). "
+                    f"Currently allowed: {allowed}"
+                ))]
+            result = client.call_method(
+                model=model,
+                method=method,
+                ids=arguments.get("ids"),
+                kwargs=arguments.get("kwargs")
+            )
+            return [TextContent(type="text", text=_format_call_method_result(result))]
 
         else:
             raise ValueError(f"Unknown tool: {name}")

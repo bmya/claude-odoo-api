@@ -200,6 +200,50 @@ class TestOdooClient:
 
             assert result == 42
 
+    def test_call_method_payload(self):
+        """Test call_method builds the payload from ids + kwargs"""
+        client = OdooClient(
+            url="http://localhost:8069",
+            database="test_db",
+            api_key="test_key"
+        )
+
+        with patch.object(client, '_make_request') as mock_request:
+            mock_request.return_value = True
+
+            result = client.call_method(
+                model="account.move",
+                method="action_post",
+                ids=[1, 2],
+                kwargs={"soft": True}
+            )
+
+            assert result is True
+            mock_request.assert_called_once_with(
+                "account.move",
+                "action_post",
+                {"soft": True, "ids": [1, 2]}
+            )
+
+    def test_call_method_no_ids(self):
+        """Test call_method omits ids when not provided"""
+        client = OdooClient(
+            url="http://localhost:8069",
+            database="test_db",
+            api_key="test_key"
+        )
+
+        with patch.object(client, '_make_request') as mock_request:
+            mock_request.return_value = None
+
+            client.call_method(model="calendar.event", method="action_sync_timesheets")
+
+            mock_request.assert_called_once_with(
+                "calendar.event",
+                "action_sync_timesheets",
+                {}
+            )
+
 
 class TestConfigurationLoading:
     """Tests for configuration loading"""
@@ -323,7 +367,7 @@ class TestMCPToolIntegration:
 
         tools = await list_tools()
 
-        assert len(tools) == 11
+        assert len(tools) == 12
         tool_names = [tool.name for tool in tools]
 
         assert "odoo_list_companies" in tool_names
@@ -337,6 +381,7 @@ class TestMCPToolIntegration:
         assert "odoo_list_models" in tool_names
         assert "odoo_fields_get" in tool_names
         assert "odoo_name_search" in tool_names
+        assert "odoo_call_method" in tool_names
 
     @pytest.mark.asyncio
     async def test_call_list_companies(self, temp_env_file):
@@ -470,6 +515,92 @@ class TestReadOnlyKillSwitch:
 
         assert "read-only mode" not in result[0].text
         readonly_client.search_read.assert_called_once()
+
+
+class TestCallMethod:
+    """Tests for the odoo_call_method tool (allowlist + readonly + result parsing)"""
+
+    @pytest.fixture
+    def call_method_client(self):
+        """Patch get_odoo_client and set a deterministic allowlist; restore afterwards."""
+        import odoo_mcp_server
+        original_allowed = odoo_mcp_server.ODOO_ALLOWED_METHODS
+        original_readonly = odoo_mcp_server.READ_ONLY
+        odoo_mcp_server.ODOO_ALLOWED_METHODS = {"account.move.action_post"}
+        odoo_mcp_server.READ_ONLY = False
+        client = Mock()
+        client.call_method = Mock(return_value=True)
+        with patch.object(odoo_mcp_server, "get_odoo_client", return_value=client):
+            yield client
+        odoo_mcp_server.ODOO_ALLOWED_METHODS = original_allowed
+        odoo_mcp_server.READ_ONLY = original_readonly
+
+    @pytest.mark.asyncio
+    async def test_allowed_method(self, call_method_client):
+        from odoo_mcp_server import call_tool
+
+        result = await call_tool("odoo_call_method", {
+            "company": "c",
+            "model": "account.move",
+            "method": "action_post",
+            "ids": [7],
+            "kwargs": {"soft": True},
+        })
+
+        call_method_client.call_method.assert_called_once_with(
+            model="account.move",
+            method="action_post",
+            ids=[7],
+            kwargs={"soft": True},
+        )
+        assert "not allowed" not in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_not_allowed_method(self, call_method_client):
+        from odoo_mcp_server import call_tool
+
+        result = await call_tool("odoo_call_method", {
+            "company": "c",
+            "model": "res.partner",
+            "method": "unlink_everything",
+        })
+
+        assert "not allowed" in result[0].text
+        assert "ODOO_MCP_ALLOWED_METHODS" in result[0].text
+        call_method_client.call_method.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_blocked_by_readonly(self, call_method_client):
+        import odoo_mcp_server
+        from odoo_mcp_server import call_tool
+
+        odoo_mcp_server.READ_ONLY = True
+        result = await call_tool("odoo_call_method", {
+            "company": "c",
+            "model": "account.move",
+            "method": "action_post",
+        })
+
+        assert "read-only mode" in result[0].text
+        call_method_client.call_method.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_notification_message_parsing(self, call_method_client):
+        from odoo_mcp_server import call_tool
+
+        call_method_client.call_method.return_value = {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {"message": "Posted"},
+        }
+
+        result = await call_tool("odoo_call_method", {
+            "company": "c",
+            "model": "account.move",
+            "method": "action_post",
+        })
+
+        assert result[0].text == "Posted"
 
 
 if __name__ == "__main__":

@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased] - 2026-07-10 (bis)
+
+### Added
+- Nuevo tool `odoo_call_method`: ejecuta **métodos de negocio** de Odoo 19 (acciones de
+  workflow) vía `POST /json/2/{model}/{method}`. Restringido por **lista blanca**
+  configurable con la env var `ODOO_MCP_ALLOWED_METHODS` (formato
+  `"modelo.metodo,modelo.metodo"`). Defaults: `calendar.event.action_sync_timesheets`,
+  `account.move.action_post`, `sale.order.action_confirm`.
+- Cuenta como operación de escritura → bloqueado por el kill-switch `ODOO_MCP_READONLY`.
+- El resultado se muestra como mensaje legible si viene una notificación
+  (`ir.actions.client` con `params.message`); si no, como JSON. Total de tools: **12**.
+- Tests: `TestCallMethod` (allowlist, no permitido, bloqueo por readonly, parsing de
+  notificación) + `test_call_method_payload` / `test_call_method_no_ids` (31 tests en total).
+
 ## [Unreleased] - 2026-07-10
 
 ### Added

@@ -4,11 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server that provides tools to interact with Odoo 19's External JSON-2 API. The server supports multiple company/instance configurations and exposes 11 tools on Odoo databases: list_companies, search_read, create, write, unlink, search, read, search_count, list_models, fields_get, and name_search.
+This is an MCP (Model Context Protocol) server that provides tools to interact with Odoo 19's External JSON-2 API. The server supports multiple company/instance configurations and exposes 12 tools on Odoo databases: list_companies, search_read, create, write, unlink, search, read, search_count, list_models, fields_get, name_search, and call_method.
 
 The introspection tools (`list_models`, `fields_get`) and `name_search` are implemented on top of the proven `search_read` endpoint over the meta-models `ir.model` / `ir.model.fields` — they do NOT use new endpoints, since `/json/2/{model}/call` returns 404 on these instances. Note: `name_search` filters on the `name` field (not `display_name`, which is a non-searchable computed field on this instance and is silently ignored by ilike).
 
-Write operations can be globally disabled with `ODOO_MCP_READONLY=1` (also `true`/`yes`) — a kill-switch to protect production without redeploying.
+Write operations can be globally disabled with `ODOO_MCP_READONLY=1` (also `true`/`yes`) — a kill-switch to protect production without redeploying. This also blocks `call_method`, since business-method actions mutate data.
+
+The `call_method` tool runs arbitrary Odoo business methods (e.g. `account.move.action_post`), so it is gated by an allowlist. The allowlist is configured with `ODOO_MCP_ALLOWED_METHODS` (comma-separated `model.method` pairs); its defaults are `calendar.event.action_sync_timesheets`, `account.move.action_post`, and `sale.order.action_confirm`. Calls to methods outside the allowlist are rejected with an error explaining how to enable them.
 
 ## 🔧 CRITICAL FIX HISTORY - 2025-12-23
 
