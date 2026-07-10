@@ -1,5 +1,5 @@
 # Multi-stage build for smaller final image
-FROM python:3.12-slim as builder
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
@@ -49,11 +49,11 @@ COPY --chown=odoo:odoo src/ ./src/
 # Switch to non-root user
 USER odoo
 
-# Set environment variables (can be overridden at runtime)
+# Set environment variables (can be overridden at runtime).
+# Nota: ODOO_URL / ODOO_DATABASE / ODOO_API_KEY se proveen SOLO en runtime
+# (--env-file o -e); no se declaran aquí para no hornear secretos en la imagen
+# (aviso SecretsUsedInArgOrEnv de docker build).
 ENV PATH=/home/odoo/.local/bin:$PATH
-ENV ODOO_URL=http://localhost:8069
-ENV ODOO_DATABASE=""
-ENV ODOO_API_KEY=""
 ENV ODOO_REQUEST_TIMEOUT=30
 ENV ODOO_MAX_RETRIES=3
 
