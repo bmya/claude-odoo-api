@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] - 2026-07-10
+
+### Added
+- `odoo_create` acepta ahora una **lista de dicts** para alta masiva (un solo request → lista de IDs), además del dict único. Schema del tool actualizado (`values: object | array`).
+- Test `test_create_records_mass` (25 tests en total).
+
+### Nota de despliegue
+- El fix de `vals_list`/`vals` para Odoo 19 (commit 4bc461b, jun-2026) estaba en el código pero **la imagen Docker nunca se reconstruyó**: el conector seguía fallando con "missing a required argument: 'vals_list'". Tras cualquier cambio: `docker build -t bmya/odoo-mcp-server:latest . && docker tag bmya/odoo-mcp-server:latest odoo-mcp-server:latest`, y deshabilitar/rehabilitar `odoo-api` en la app de Claude (o reiniciarla).
+
 ## [Unreleased] - 2025-11-08
 
 ### Added - Image Processing & Infrastructure Improvements

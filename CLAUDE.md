@@ -84,12 +84,11 @@ docker run --rm -v /Users/danielb/ClaudeCodeProjects/claude-odoo-api/.env:/app/.
 - Status: ✅ Funcionando correctamente
 
 **Estado en Docker MCP Toolkit:**
-```bash
-docker mcp server list
-# MCP Servers (2 enabled)
-# - odoo-api         (✓ habilitado)
-# - perplexity-ask   (✓ habilitado)
-```
+
+`odoo-api` lo lanza la app de Claude vía `docker run -i ... bmya/odoo-mcp-server:latest`
+(servidor MCP local por stdio), no por el gateway `docker mcp`. Por eso no aparece en
+`docker mcp profile server ls`. Para ver/gestionar su estado, usá el panel de
+"Servidores MCP locales" de la app de Claude.
 
 ### Git Status
 
@@ -390,21 +389,24 @@ config:
 
 ### Docker MCP Toolkit (Official)
 
-El servidor `odoo-api` se gestiona a través del **Docker MCP Toolkit** que viene integrado en Docker Desktop.
+El servidor `odoo-api` corre como servidor MCP local de la app de Claude (la app lanza
+`docker run -i ... bmya/odoo-mcp-server:latest` por stdio). No se gestiona por el gateway
+`docker mcp`, así que habilitar/deshabilitar se hace desde el panel de "Servidores MCP
+locales" de la app. Para que un rebuild de la imagen tome efecto, deshabilitá/volvé a
+habilitar `odoo-api` en la app (o reiniciá la app): el próximo `docker run` usa la imagen
+nueva.
 
-**Comandos principales:**
+> **Nota:** los comandos `docker mcp server enable/disable/list` quedaron obsoletos en
+> versiones recientes del toolkit (`docker mcp server` ahora solo expone `init`). La
+> gestión por gateway pasó a `docker mcp profile server add/remove`.
+
+**Comandos del toolkit aún vigentes (gateway):**
 ```bash
-# Listar servidores habilitados
-docker mcp server list
+# Servidores registrados en el gateway por profile
+docker mcp profile server ls
 
-# Habilitar/deshabilitar servidor
-docker mcp server enable odoo-api
-docker mcp server disable odoo-api
-
-# Ver catálogos disponibles
-docker mcp catalog ls
-
-# Ver servidores en catálogo
+# Catálogos
+docker mcp catalog list
 docker mcp catalog show bmya-mcp-catalog
 ```
 
@@ -414,10 +416,9 @@ docker mcp catalog show bmya-mcp-catalog
 - Contiene el servidor `odoo-api` con configuración Docker
 
 **Estado actual del servidor:**
-- ✅ Servidor `odoo-api` registrado en catálogo `bmya-mcp-catalog`
 - ✅ Imagen Docker: `bmya/odoo-mcp-server:latest`
 - ✅ Montaje de volumen: `.env` file para configuración multi-company
-- ✅ Habilitado en Docker MCP Toolkit
+- ✅ Lanzado por la app de Claude como servidor MCP local (stdio)
 
 ### MCP Manager (~/mcp-manager)
 
@@ -427,7 +428,7 @@ docker mcp catalog show bmya-mcp-catalog
 - Reduce consumo de tokens al deshabilitar servidores no necesarios por proyecto
 
 **NO es necesario para:**
-- Activar/desactivar servidores globalmente (se hace con `docker mcp server enable/disable`)
+- Activar/desactivar servidores locales de la app (se hace desde el panel de "Servidores MCP locales" de la app)
 - Conectar clientes (Claude/Cursor) al gateway (se hace con `docker mcp client connect`)
 
 **ES útil para:**

@@ -158,8 +158,12 @@ class OdooClient:
 
         return self._make_request(model, "search_read", payload)
 
-    def create(self, model: str, values: dict) -> int:
-        """Create a new record"""
+    def create(self, model: str, values) -> Any:
+        """Create one record (dict) or several records (list of dicts).
+
+        Odoo 19 /json/2 expects the ``vals_list`` kwarg; it accepts a single
+        dict or a list of dicts (mass creation). Returns the new id(s).
+        """
         payload = {"vals_list": values}
         return self._make_request(model, "create", payload)
 
@@ -324,7 +328,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="odoo_create",
-            description="Create a new record in an Odoo model",
+            description="Create one record (dict) or several records (list of dicts) in an Odoo model",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -337,8 +341,9 @@ async def list_tools() -> list[Tool]:
                         "description": "The Odoo model name (e.g., 'res.partner', 'account.move')"
                     },
                     "values": {
-                        "type": "object",
-                        "description": "Dictionary of field values for the new record"
+                        "type": ["object", "array"],
+                        "items": {"type": "object"},
+                        "description": "Field values for the new record (dict), or a list of dicts for mass creation"
                     }
                 },
                 "required": ["company", "model", "values"]
@@ -595,6 +600,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 model=arguments["model"],
                 values=arguments["values"]
             )
+            if isinstance(result, list):
+                return [TextContent(type="text", text=f"Created {len(result)} records with IDs: {result}")]
             return [TextContent(type="text", text=f"Created record with ID: {result}")]
 
         elif name == "odoo_write":

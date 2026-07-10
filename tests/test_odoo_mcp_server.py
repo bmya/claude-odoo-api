@@ -122,6 +122,27 @@ class TestOdooClient:
                 {"vals_list": {"name": "Test Partner", "email": "test@example.com"}}
             )
 
+    def test_create_records_mass(self):
+        """Test create method with a list of dicts (mass creation)"""
+        client = OdooClient(
+            url="http://localhost:8069",
+            database="test_db",
+            api_key="test_key"
+        )
+
+        vals_list = [{"name": "Partner A"}, {"name": "Partner B"}]
+        with patch.object(client, '_make_request') as mock_request:
+            mock_request.return_value = [42, 43]
+
+            result = client.create(model="res.partner", values=vals_list)
+
+            assert result == [42, 43]
+            mock_request.assert_called_once_with(
+                "res.partner",
+                "create",
+                {"vals_list": vals_list}
+            )
+
     def test_write_record(self):
         """Test write method"""
         client = OdooClient(
