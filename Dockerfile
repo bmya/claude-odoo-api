@@ -57,9 +57,16 @@ ENV PATH=/home/odoo/.local/bin:$PATH
 ENV ODOO_REQUEST_TIMEOUT=30
 ENV ODOO_MAX_RETRIES=3
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)"
+# HTTP transport port (only used when MCP_TRANSPORT=http)
+EXPOSE 8080
 
-# Run the MCP server
+# Health check: hits /health in HTTP mode; a no-op in stdio mode or when the
+# app terminates TLS directly (deployment terminates TLS at the reverse proxy).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import os,sys,urllib.request; \
+m=os.getenv('MCP_TRANSPORT','stdio'); \
+sys.exit(0) if m!='http' or os.getenv('MCP_TLS_CERTFILE') else \
+urllib.request.urlopen('http://127.0.0.1:'+os.getenv('MCP_HTTP_PORT','8080')+'/health', timeout=5).read()"
+
+# Run the MCP server (transport selected via MCP_TRANSPORT env var)
 CMD ["python", "src/odoo_mcp_server.py"]

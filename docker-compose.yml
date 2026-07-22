@@ -1,16 +1,41 @@
 services:
+  # Streamable HTTP transport — shareable over the network / for local testing.
+  # Credentials are NOT stored here: each user sends their Odoo URL/database/api-key
+  # as X-Odoo-* headers from their local MCP client config. So there is no .env mount.
   odoo-api:
     build: .
     container_name: odoo-mcp-server
+    ports:
+      - "8080:8080"
+    environment:
+      - MCP_TRANSPORT=http
+      - MCP_HTTP_HOST=0.0.0.0
+      - MCP_HTTP_PORT=8080
+      # Optional "front door" token (leave empty to rely on network/VPN gating):
+      - MCP_GATEWAY_TOKEN=${MCP_GATEWAY_TOKEN:-}
+      # Server-level guardrails (apply to every user):
+      - ODOO_MCP_READONLY=${ODOO_MCP_READONLY:-}
+      - ODOO_MCP_ALLOWED_METHODS=${ODOO_MCP_ALLOWED_METHODS:-}
+      - ODOO_REQUEST_TIMEOUT=${ODOO_REQUEST_TIMEOUT:-30}
+      - ODOO_MAX_RETRIES=${ODOO_MAX_RETRIES:-3}
+    restart: unless-stopped
+    networks:
+      - odoo-network
+
+  # Legacy stdio transport (one process per user, launched by the Claude app via
+  # `docker run -i`). Credentials come from a mounted multi-company .env.
+  # Enable with:  docker compose --profile stdio up odoo-api-stdio
+  odoo-api-stdio:
+    profiles: ["stdio"]
+    build: .
+    container_name: odoo-mcp-server-stdio
     volumes:
-      # Mount .env file for multi-company configuration
       - ./.env:/app/.env:ro
     environment:
-      # Optional: Override config file location
+      - MCP_TRANSPORT=stdio
       - ODOO_CONFIG_FILE=${ODOO_CONFIG_FILE:-/app/.env}
     stdin_open: true
     tty: true
-    restart: unless-stopped
     networks:
       - odoo-network
 

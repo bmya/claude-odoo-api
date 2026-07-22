@@ -3,6 +3,10 @@ mcp>=1.0.0
 requests>=2.31.0
 PyYAML>=6.0.1
 
+# HTTP transport (Streamable HTTP server). starlette ships with mcp,
+# uvicorn is the ASGI server used to run it.
+uvicorn>=0.30.0
+
 # Image processing
 Pillow>=10.0.0
 

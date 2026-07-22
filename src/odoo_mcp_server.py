@@ -9,6 +9,8 @@ and image processing capabilities.
 
 import os
 import json
+import asyncio
+import hashlib
 import logging
 import time
 from typing import Any, Optional, Dict
@@ -33,6 +35,32 @@ CONFIG_FILE = os.getenv("ODOO_CONFIG_FILE", ".env")
 # Request configuration from environment
 REQUEST_TIMEOUT = int(os.getenv("ODOO_REQUEST_TIMEOUT", "30"))
 MAX_RETRIES = int(os.getenv("ODOO_MAX_RETRIES", "3"))
+
+# Transport: "stdio" (default, local one-process-per-user) or "http"
+# (Streamable HTTP, shareable over the network). In HTTP mode credentials are
+# supplied per request via headers (see resolve_odoo_client), so the server
+# stores no Odoo credentials of its own.
+MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio").lower()
+MCP_HTTP_HOST = os.getenv("MCP_HTTP_HOST", "127.0.0.1")
+MCP_HTTP_PORT = int(os.getenv("MCP_HTTP_PORT", "8080"))
+MCP_HTTP_PATH = os.getenv("MCP_HTTP_PATH", "/mcp")
+
+# TLS: if both are set, uvicorn serves HTTPS directly. Otherwise plain HTTP is
+# served and TLS is expected to be terminated by a reverse proxy (Traefik).
+MCP_TLS_CERTFILE = os.getenv("MCP_TLS_CERTFILE") or None
+MCP_TLS_KEYFILE = os.getenv("MCP_TLS_KEYFILE") or None
+# Which client IPs are trusted to set X-Forwarded-* (default: trust the proxy).
+MCP_FORWARDED_ALLOW_IPS = os.getenv("MCP_FORWARDED_ALLOW_IPS", "*")
+
+# Optional gateway token: when set, HTTP requests must carry a matching
+# X-Gateway-Token header. A reconfigurable "front door" independent of the
+# network gate (e.g. Twingate/VLAN).
+MCP_GATEWAY_TOKEN = os.getenv("MCP_GATEWAY_TOKEN") or None
+
+# Per-request credential headers (case-insensitive) used in HTTP transport.
+HEADER_URL = "x-odoo-url"
+HEADER_DB = "x-odoo-database"
+HEADER_KEY = "x-odoo-api-key"
 
 # Read-only kill-switch: when enabled, write operations (create/write/unlink)
 # are blocked without redeploying. Useful to protect production instances.
@@ -310,6 +338,61 @@ def list_available_companies() -> list[str]:
     return list(configs.keys())
 
 
+def _get_or_create_client(url: str, database: str, api_key: str) -> OdooClient:
+    """Get or create a client keyed by a hash of its credentials.
+
+    Keying on the credential hash (not on a company name) isolates tenants:
+    two users with different Odoo credentials never share a cached client,
+    while connection pooling is preserved for repeated calls with the same
+    credentials.
+    """
+    global odoo_clients
+    key = hashlib.sha256(f"{url}|{database}|{api_key}".encode()).hexdigest()
+    if key not in odoo_clients:
+        odoo_clients[key] = OdooClient(url, database, api_key)
+    return odoo_clients[key]
+
+
+def _request_headers():
+    """Return the inbound HTTP headers when running under HTTP transport, else None.
+
+    Under stdio transport there is no request object, so this returns None and
+    callers fall back to the .env/company configuration.
+    """
+    try:
+        ctx = app.request_context
+    except LookupError:
+        return None
+    request = getattr(ctx, "request", None)
+    return request.headers if request is not None else None
+
+
+def resolve_odoo_client(arguments: dict) -> OdooClient:
+    """Resolve the Odoo client for a tool call.
+
+    HTTP transport: credentials come from the X-Odoo-* connection headers
+    (per-user, multi-tenant). stdio transport (or missing headers): fall back
+    to the 'company' argument against the server .env.
+    """
+    headers = _request_headers()
+    if headers is not None:
+        url = headers.get(HEADER_URL)
+        database = headers.get(HEADER_DB)
+        api_key = headers.get(HEADER_KEY)
+        if url and database and api_key:
+            return _get_or_create_client(url, database, api_key)
+
+    company = arguments.get("company")
+    if company:
+        return get_odoo_client(company)
+
+    raise ValueError(
+        "No Odoo credentials provided. Send X-Odoo-Url, X-Odoo-Database and "
+        "X-Odoo-Api-Key headers on the MCP connection, or configure a company "
+        "in the server .env and pass the 'company' argument."
+    )
+
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """List available Odoo tools"""
@@ -330,7 +413,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use (as defined in .env file sections)"
+                        "description": "Optional. Company configuration name from the server .env sections (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -359,7 +442,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Sorting order (e.g., 'name asc', 'create_date desc')"
                     }
                 },
-                "required": ["company", "model"]
+                "required": ["model"]
             }
         ),
         Tool(
@@ -370,7 +453,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -382,7 +465,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Field values for the new record (dict), or a list of dicts for mass creation"
                     }
                 },
-                "required": ["company", "model", "values"]
+                "required": ["model", "values"]
             }
         ),
         Tool(
@@ -393,7 +476,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -409,7 +492,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Dictionary of field values to update"
                     }
                 },
-                "required": ["company", "model", "ids", "values"]
+                "required": ["model", "ids", "values"]
             }
         ),
         Tool(
@@ -420,7 +503,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -432,7 +515,7 @@ async def list_tools() -> list[Tool]:
                         "description": "List of record IDs to delete"
                     }
                 },
-                "required": ["company", "model", "ids"]
+                "required": ["model", "ids"]
             }
         ),
         Tool(
@@ -443,7 +526,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -467,7 +550,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Sorting order"
                     }
                 },
-                "required": ["company", "model"]
+                "required": ["model"]
             }
         ),
         Tool(
@@ -478,7 +561,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -495,7 +578,7 @@ async def list_tools() -> list[Tool]:
                         "description": "List of field names to retrieve"
                     }
                 },
-                "required": ["company", "model", "ids"]
+                "required": ["model", "ids"]
             }
         ),
         Tool(
@@ -506,7 +589,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -518,7 +601,7 @@ async def list_tools() -> list[Tool]:
                         "default": []
                     }
                 },
-                "required": ["company", "model"]
+                "required": ["model"]
             }
         ),
         Tool(
@@ -529,7 +612,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "filter": {
                         "type": "string",
@@ -540,7 +623,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of models to return (default 100)"
                     }
                 },
-                "required": ["company"]
+                "required": []
             }
         ),
         Tool(
@@ -551,7 +634,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -563,7 +646,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Field attributes to return from ir.model.fields. Defaults to name, field_description, ttype, relation, required, readonly."
                     }
                 },
-                "required": ["company", "model"]
+                "required": ["model"]
             }
         ),
         Tool(
@@ -574,7 +657,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -589,7 +672,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of matches to return (default 10)"
                     }
                 },
-                "required": ["company", "model", "name"]
+                "required": ["model", "name"]
             }
         ),
         Tool(
@@ -606,7 +689,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "company": {
                         "type": "string",
-                        "description": "The company configuration name to use"
+                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
                     },
                     "model": {
                         "type": "string",
@@ -626,7 +709,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional keyword arguments to pass to the method"
                     }
                 },
-                "required": ["company", "model", "method"]
+                "required": ["model", "method"]
             }
         )
     ]
@@ -637,18 +720,25 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls"""
     try:
         if name == "odoo_list_companies":
+            headers = _request_headers()
+            if headers is not None and headers.get(HEADER_URL):
+                return [TextContent(
+                    type="text",
+                    text=(
+                        "Current connection instance (from headers):\n"
+                        f"  URL: {headers.get(HEADER_URL)}\n"
+                        f"  Database: {headers.get(HEADER_DB)}"
+                    )
+                )]
             companies = list_available_companies()
             return [TextContent(
                 type="text",
                 text=f"Available companies: {', '.join(companies)}\n\nTotal: {len(companies)}"
             )]
 
-        # All other tools require a company parameter
-        company = arguments.get("company")
-        if not company:
-            raise ValueError("Company parameter is required")
-
-        client = get_odoo_client(company)
+        # All other tools need a resolved Odoo client: credentials come from the
+        # X-Odoo-* headers (HTTP transport) or from the 'company' .env section.
+        client = resolve_odoo_client(arguments)
 
         # Read-only kill-switch: block write operations when enabled
         if READ_ONLY and name in ("odoo_create", "odoo_write", "odoo_unlink", "odoo_call_method"):
@@ -781,18 +871,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 
-async def main():
-    """Run the MCP server"""
-    logger.info("Starting Odoo MCP Server (Multi-Company Support)")
-    logger.info(f"Configuration file: {CONFIG_FILE}")
-
-    try:
-        companies = list_available_companies()
-        logger.info(f"Loaded {len(companies)} companies: {', '.join(companies)}")
-    except Exception as e:
-        logger.warning(f"Could not load company configurations on startup: {e}")
-        logger.warning("Configurations will be loaded on first tool call")
-
+async def run_stdio():
+    """Run the MCP server over stdio (local, one process per user)."""
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await app.run(
             read_stream,
@@ -801,6 +881,90 @@ async def main():
         )
 
 
+def run_http():
+    """Run the MCP server over Streamable HTTP (shareable over the network).
+
+    Stateless: each request is independent and credentials arrive per request
+    via the X-Odoo-* headers. Serves plain HTTP by default (TLS terminated by a
+    reverse proxy) or HTTPS directly when MCP_TLS_CERTFILE/KEYFILE are set.
+    """
+    import contextlib
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
+    from starlette.responses import JSONResponse, Response
+    from starlette.middleware import Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+    session_manager = StreamableHTTPSessionManager(app=app, stateless=True)
+
+    async def handle_mcp(scope, receive, send):
+        await session_manager.handle_request(scope, receive, send)
+
+    async def health(_request):
+        return JSONResponse({"status": "ok"})
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        async with session_manager.run():
+            yield
+
+    class GatewayTokenMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            if request.url.path != "/health" and \
+                    request.headers.get("x-gateway-token") != MCP_GATEWAY_TOKEN:
+                return Response("Unauthorized", status_code=401)
+            return await call_next(request)
+
+    middleware = [Middleware(GatewayTokenMiddleware)] if MCP_GATEWAY_TOKEN else []
+
+    starlette_app = Starlette(
+        debug=False,
+        routes=[
+            Route("/health", health, methods=["GET"]),
+            Mount(MCP_HTTP_PATH, app=handle_mcp),
+        ],
+        middleware=middleware,
+        lifespan=lifespan,
+    )
+
+    ssl_kwargs = {}
+    if MCP_TLS_CERTFILE and MCP_TLS_KEYFILE:
+        ssl_kwargs = {"ssl_certfile": MCP_TLS_CERTFILE, "ssl_keyfile": MCP_TLS_KEYFILE}
+
+    scheme = "https" if ssl_kwargs else "http"
+    logger.info(
+        f"HTTP transport listening on {scheme}://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}{MCP_HTTP_PATH} "
+        f"(gateway token: {'on' if MCP_GATEWAY_TOKEN else 'off'})"
+    )
+    uvicorn.run(
+        starlette_app,
+        host=MCP_HTTP_HOST,
+        port=MCP_HTTP_PORT,
+        proxy_headers=True,
+        forwarded_allow_ips=MCP_FORWARDED_ALLOW_IPS,
+        **ssl_kwargs,
+    )
+
+
+def main():
+    """Run the MCP server using the configured transport (stdio or http)."""
+    logger.info("Starting Odoo MCP Server (Multi-Company Support)")
+    logger.info(f"Transport: {MCP_TRANSPORT}")
+
+    try:
+        companies = list_available_companies()
+        logger.info(f"Loaded {len(companies)} companies: {', '.join(companies)}")
+    except Exception as e:
+        logger.warning(f"Could not load company configurations on startup: {e}")
+        logger.warning("In HTTP mode this is expected: credentials come from request headers")
+
+    if MCP_TRANSPORT == "http":
+        run_http()
+    else:
+        asyncio.run(run_stdio())
+
+
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()

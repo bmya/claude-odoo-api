@@ -189,6 +189,24 @@ Configuration loading:
 - `list_available_companies()` returns list of configured company names
 - Environment variable `ODOO_CONFIG_FILE` can override default `.env` path
 
+### Transports: stdio (local) vs HTTP (remote, multi-tenant)
+
+The server supports two transports, selected by `MCP_TRANSPORT` (default `stdio`):
+
+- **stdio** (default): one process per user, launched by the Claude app via `docker run -i`. Credentials come from the mounted multi-company `.env` (see above) and the tool `company` argument selects a section. Unchanged legacy behavior.
+- **http** (`MCP_TRANSPORT=http`): Streamable HTTP served by uvicorn/Starlette (`run_http()` in `src/odoo_mcp_server.py`) at `MCP_HTTP_PATH` (default `/mcp`), for a shared/remote deployment. The server stores **no** Odoo credentials — each user sends their own instance as connection headers `X-Odoo-Url` / `X-Odoo-Database` / `X-Odoo-Api-Key`, so every user is bound to their own Odoo permissions and can target multiple databases (one MCP client entry per instance). See [docs/remote-client-config.md](docs/remote-client-config.md).
+
+Key HTTP-mode internals (all in `src/odoo_mcp_server.py`):
+- `resolve_odoo_client(arguments)` reads the `X-Odoo-*` headers from `app.request_context.request.headers`; falls back to `.env`/`company` when there are no headers (stdio). The `company` tool argument is optional and ignored in HTTP mode.
+- Clients are cached by a **SHA-256 hash of `(url|database|api_key)`** (not by company name) via `_get_or_create_client()`, so tenants never share a cached client.
+- Runs **stateless** (`StreamableHTTPSessionManager(stateless=True)`): each request is independent; credential headers travel on every request.
+- `GET /health` returns `{"status":"ok"}` (real container healthcheck).
+- **TLS**: serves plain HTTP behind a TLS-terminating reverse proxy (Traefik) with `proxy_headers=True` (honors `X-Forwarded-Proto`). Set `MCP_TLS_CERTFILE`/`MCP_TLS_KEYFILE` to serve HTTPS directly (e.g. self-signed for local tests).
+- **Gateway token** (optional, reconfigurable front door): if `MCP_GATEWAY_TOKEN` is set, requests must carry a matching `X-Gateway-Token` header (`/health` exempt); otherwise access relies on the network gate (Twingate/VLAN).
+- The `ODOO_MCP_READONLY` and `ODOO_MCP_ALLOWED_METHODS` guardrails are server-level and apply to every user/connection.
+
+HTTP server-level env vars are documented in `.env.http.example` (no Odoo credentials there). The `.env` INI is only for stdio mode.
+
 ## Development Commands
 
 ### Local Development
