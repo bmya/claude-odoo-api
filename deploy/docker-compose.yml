@@ -1,0 +1,49 @@
+# HTTP (Streamable HTTP) stack. Run from THIS directory:
+#     cd deploy && docker compose up -d --build
+#
+# It lives in a subdirectory on purpose: Docker Compose auto-loads a file named
+# ".env" from the working directory for its own variable interpolation. The repo
+# root ".env" is the stdio credential INI (mounted by the Claude app), and its
+# values are not Compose syntax — running Compose from the root makes it parse
+# that secret file and emit spurious "variable is not set" warnings. Keeping the
+# HTTP compose here (no local .env) avoids reading the secret entirely.
+#
+# Credentials are NOT stored here: each user sends their Odoo URL/database/api-key
+# as X-Odoo-* headers from their local MCP client config.
+services:
+  odoo-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: odoo-mcp-server
+    ports:
+      - "8080:8080"
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HTTP_HOST: 0.0.0.0
+      MCP_HTTP_PORT: "8080"
+      # Optional "front door" token (leave unset to rely on network/VPN gating):
+      # MCP_GATEWAY_TOKEN: "change-me"
+      # Server-level guardrails (apply to every user):
+      # ODOO_MCP_READONLY: "1"
+      # ODOO_MCP_ALLOWED_METHODS: "account.move.action_post,sale.order.action_confirm"
+      ODOO_REQUEST_TIMEOUT: "30"
+      ODOO_MAX_RETRIES: "3"
+    restart: unless-stopped
+
+  # Legacy stdio transport (one process per user). Normally launched by the Claude
+  # app via `docker run -i`, not by this compose. Enable here with:
+  #     cd deploy && docker compose --profile stdio up odoo-api-stdio
+  odoo-api-stdio:
+    profiles: ["stdio"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: odoo-mcp-server-stdio
+    volumes:
+      - ../.env:/app/.env:ro
+    environment:
+      MCP_TRANSPORT: stdio
+      ODOO_CONFIG_FILE: /app/.env
+    stdin_open: true
+    tty: true

@@ -50,8 +50,8 @@ Una entrada por cada base/cliente que uses. Ejemplo (Claude Desktop / Claude Cod
 
 ## Prueba local (Fase 1)
 
-Con el contenedor levantado en local (`docker compose up` o
-`MCP_TRANSPORT=http python src/odoo_mcp_server.py`):
+Con el contenedor levantado en local (`cd deploy && docker compose up -d --build`
+o `MCP_TRANSPORT=http python src/odoo_mcp_server.py`):
 
 - HTTP:  `http://localhost:8080/mcp`
 - HTTPS (si seteás `MCP_TLS_CERTFILE`/`MCP_TLS_KEYFILE`): `https://localhost:8443/mcp`

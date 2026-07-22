@@ -228,17 +228,26 @@ export ODOO_API_KEY=your_api_key
 
 ### Docker
 
+The compose stack lives in `deploy/` and MUST be run from there. It is not at the
+repo root on purpose: Docker Compose auto-loads a root `.env` for interpolation,
+and this repo's root `.env` is the stdio credential INI (values are not Compose
+syntax), which triggers spurious "variable is not set" warnings. Running from
+`deploy/` (no local `.env`) avoids reading the secret.
+
 ```bash
-# Build and run
-docker-compose up -d
+# Build and run the HTTP server (from deploy/)
+cd deploy && docker compose up -d --build
 
 # View logs
-docker-compose logs -f
+cd deploy && docker compose logs -f
 
 # Stop
-docker-compose down
+cd deploy && docker compose down
 
-# Build image only
+# Legacy stdio transport via compose (normally the Claude app runs this itself)
+cd deploy && docker compose --profile stdio up odoo-api-stdio
+
+# Build image only (from repo root)
 docker build -t odoo-mcp-server .
 
 # Run with custom env vars
