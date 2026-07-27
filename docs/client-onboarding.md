@@ -27,7 +27,7 @@ Si usás **Claude Code** (terminal), copiá y pegá este único comando,
 reemplazando `TU_API_KEY_DE_ODOO` por la que generaste en el paso 1:
 
 ```bash
-claude mcp add --transport http odoo https://odoo-mcp.bmya.cloud/mcp \
+claude mcp add --transport http odoo https://odoo-mcp.bmya.cloud/mcp/ \
   --header "X-Bmya-Api-Key: la-key-que-te-dio-bmya" \
   --header "X-Odoo-Api-Key: TU_API_KEY_DE_ODOO"
 ```
@@ -42,7 +42,7 @@ Si usás la **app Claude Desktop**, pegá este bloque en
     "odoo": {
       "command": "npx",
       "args": [
-        "-y", "mcp-remote", "https://odoo-mcp.bmya.cloud/mcp", "--transport", "http-only",
+        "-y", "mcp-remote", "https://odoo-mcp.bmya.cloud/mcp/", "--transport", "http-only",
         "--header", "X-Bmya-Api-Key: la-key-que-te-dio-bmya",
         "--header", "X-Odoo-Api-Key: TU_API_KEY_DE_ODOO"
       ]
@@ -104,6 +104,7 @@ Puede tener fecha de vencimiento. Si la tiene, te la informamos al entregarla.
 | Pide la API key de Odoo | Falta el header `X-Odoo-Api-Key` o está vacío. |
 | Dice que la conexión es de sólo lectura | Necesitás una key de escritura. Escribinos. |
 | Un modelo o una acción "no está disponible" | Está deliberadamente fuera del alcance de tu key. Escribinos si lo necesitás. |
+| Se queda "conectando" y nunca termina | Fijate que la URL termine en barra: `.../mcp/`, no `.../mcp`. |
 
 Detalle técnico completo en
 [remote-client-config.md](remote-client-config.md).

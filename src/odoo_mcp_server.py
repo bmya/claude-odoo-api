@@ -1142,8 +1142,19 @@ def build_http_app():
 
     session_manager = StreamableHTTPSessionManager(app=app, stateless=True)
 
-    async def handle_mcp(scope, receive, send):
-        await session_manager.handle_request(scope, receive, send)
+    class McpEndpoint:
+        """The MCP transport as a raw ASGI app.
+
+        A class instance, not a function, on purpose: Starlette's Route() wraps
+        a *function* endpoint in request_response() (turning it into
+        `f(request) -> response`) and only treats a non-function endpoint as an
+        ASGI app, which is what the session manager is.
+        """
+
+        async def __call__(self, scope, receive, send):
+            await session_manager.handle_request(scope, receive, send)
+
+    handle_mcp = McpEndpoint()
 
     async def health(_request):
         """Liveness only: is the process up. Never authenticated."""
@@ -1166,12 +1177,24 @@ def build_http_app():
         async with session_manager.run():
             yield
 
+    # Serve both /mcp and /mcp/ directly, no redirect either way. A lone Mount
+    # answers the bare path with a 307 to the trailing-slash form, and
+    # mcp-remote -- the stdio bridge Claude Desktop needs -- does not follow
+    # redirects: it hangs on "Connecting to remote server..." and the app
+    # reports "Could not attach to MCP server". (Behind a proxy the 307 was
+    # also emitted as http:// when X-Forwarded-Proto was not trusted, so it
+    # would have been unusable even to a client that did follow it.) The Route
+    # takes the bare path; the Mount keeps the trailing-slash form working, and
+    # must come second so the exact match wins.
+    mcp_path = "/" + MCP_HTTP_PATH.strip("/")
+
     return Starlette(
         debug=False,
         routes=[
             Route("/health", health, methods=["GET"]),
             Route("/readyz", readyz, methods=["GET"]),
-            Mount(MCP_HTTP_PATH, app=handle_mcp),
+            Route(mcp_path, handle_mcp),
+            Mount(mcp_path, app=handle_mcp),
         ],
         # Always installed: each of its two checks is individually conditional,
         # so there is no "middleware absent, nothing enforced" state.

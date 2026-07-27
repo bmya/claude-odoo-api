@@ -101,7 +101,7 @@ Emitir (la key en claro se imprime **una sola vez**):
 python tools/bmya-keys.py new --file deploy/config/bmya-api-keys.json --write \
   --database clientex_prod --url https://clientex.bmya.cloud \
   --mode readonly --label "ClienteX lectura" --expires 2027-01-31 \
-  --server-url https://odoo-mcp.bmya.cloud/mcp
+  --server-url https://odoo-mcp.bmya.cloud/mcp/
 ```
 
 > ⚠️ **El nombre de la base tiene que ser el exacto y actual.** En Odoo.sh el
@@ -128,7 +128,7 @@ perdió, hay que reenviarlo), usá `snippet` con la key en claro por stdin:
 
 ```bash
 echo "$KEY" | python tools/bmya-keys.py snippet --stdin \
-  --file deploy/config/bmya-api-keys.json --server-url https://odoo-mcp.bmya.cloud/mcp
+  --file deploy/config/bmya-api-keys.json --server-url https://odoo-mcp.bmya.cloud/mcp/
 ```
 
 `snippet` resuelve la key contra el registro y se niega a generar el bloque si

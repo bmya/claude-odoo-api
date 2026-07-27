@@ -1,0 +1,81 @@
+# Stack para Portainer. Sin variables de entorno de Portainer: todo hardcodeado
+# a propósito, porque este stack tiene un único destino fijo (este servidor) y
+# no hay ningún secreto que amerite mantenerlo fuera del archivo (no usamos
+# MCP_GATEWAY_TOKEN: el control de acceso es enteramente por BMYA key).
+#
+# Para cambiar algo (ODOO_MCP_READONLY, la imagen, etc.): editalo directo acá
+# en el editor de stack de Portainer y "Update the stack" — no hace falta
+# tocar ninguna variable aparte.
+#
+# Sin `build:` a propósito: no baja de ghcr.io (el paquete queda privado por
+# default hasta que lo hagas público en GitHub), se buildea localmente en este
+# mismo servidor con EXACTAMENTE este tag, para que Docker lo tome de la caché
+# local en vez de intentar bajarlo:
+#
+#   git clone https://github.com/bmya/claude-odoo-api.git && cd claude-odoo-api
+#   docker build -t ghcr.io/bmya/odoo-mcp-server:latest .
+#
+# Importante: en Portainer, al desplegar/actualizar este stack, dejar
+# DESTILDADA la opción "Always pull the image" — si está tildada, Portainer va
+# a intentar bajarla de ghcr.io igual y va a fallar con el mismo error de
+# permisos, ignorando la imagen que ya tenés en caché local.
+services:
+  odoo-api:
+    image: ghcr.io/bmya/odoo-mcp-server:latest
+    container_name: odoo-mcp-server
+    ports:
+      # Sólo en la IP de la VLAN. Nunca "8080:8080" (todas las interfaces).
+      - "10.0.0.14:8080:8080"
+    volumes:
+      # OJO: este path es deploy/config/ DENTRO del clon del repo, no la raíz
+      # del repo. Si montás /root/odoo-mcp a secas, el contenedor busca
+      # /app/config/bmya-api-keys.json y no lo encuentra porque el archivo
+      # real está en /root/odoo-mcp/deploy/config/bmya-api-keys.json (un
+      # nivel más adentro) -- eso da el error "BMYA key registry not found".
+      #
+      # Directorio, no archivo: un bind mount de archivo suelto fija el inode y
+      # las revocaciones de keys nunca aplicarían.
+      - "/root/odoo-mcp/deploy/config:/app/config:ro"
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HTTP_HOST: 0.0.0.0
+
+      # Confirmación explícita: la autorización por BMYA key está activa.
+      # (El default del código ya es "1"; se deja igual por claridad.)
+      BMYA_AUTH_ENABLED: "1"
+      BMYA_API_KEYS_FILE: /app/config/bmya-api-keys.json
+
+      # Instancias reales conocidas: bmya.cloud/.cl propias, .odoo.com para las
+      # que corren en Odoo Online/Odoo.sh (ej. staging). Ajustar si sumás una
+      # instancia bajo otro dominio.
+      BMYA_ALLOWED_URL_SUFFIXES: ".bmya.cloud,.bmya.cl,.odoo.com"
+
+      # Techo global sobre todas las keys. En 0: una key readwrite puede
+      # escribir de verdad. Poner en 1 para bloquear toda escritura sin tocar
+      # el registro de keys.
+      ODOO_MCP_READONLY: "0"
+
+      # Deliberadamente NO declarada: ODOO_MCP_ALLOWED_METHODS. Si se declara
+      # aunque sea vacía, el contenedor la ve como "ningún método permitido"
+      # (distinto de "no configurada" = usa los 3 defaults seguros). Agregarla
+      # sólo si querés restringir esa lista.
+
+      # No seteadas a propósito, quedan en su default seguro:
+      #   BMYA_ALLOW_INSECURE_URLS (default: false -- nunca en producción)
+      #   MCP_GATEWAY_TOKEN        (sin uso: el control de acceso es la BMYA key)
+      #   MCP_FORWARDED_ALLOW_IPS  (default: 127.0.0.1 -- no hay Traefik en otro host que confiar)
+      #   BMYA_REGISTRY_TTL_SECONDS (default: 10s)
+      #   ODOO_REQUEST_TIMEOUT / ODOO_MAX_RETRIES (defaults: 30 / 3)
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    restart: unless-stopped

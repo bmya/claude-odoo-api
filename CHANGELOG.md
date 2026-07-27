@@ -1,5 +1,53 @@
 # Changelog
 
+## [Unreleased] - 2026-07-27 (ter) — La barra final del endpoint deja de importar
+
+### Fixed
+- **El endpoint sin barra final colgaba a `mcp-remote`, y con eso a Claude
+  Desktop.** El transporte se montaba sólo con `Mount(MCP_HTTP_PATH, ...)`, y
+  Starlette responde al path desnudo (`/mcp`) con un 307 hacia `/mcp/`.
+  `mcp-remote` —el puente stdio que la app necesita, porque su
+  `claude_desktop_config.json` no acepta headers— **no sigue redirects**: se
+  queda en "Connecting to remote server..." para siempre, lo que en la app
+  aparece como "Could not attach to MCP server". Verificado A/B: con `/mcp/`
+  conecta ("Connected to remote server using StreamableHTTPClientTransport"),
+  sin la barra no. Agravante: detrás de Traefik el 307 salía con esquema
+  `http://` mientras `MCP_FORWARDED_ALLOW_IPS` no incluyera la IP del proxy, así
+  que tampoco le habría servido a un cliente que sí siguiera redirects.
+  `build_http_app()` ahora sirve **las dos formas directo**: un `Route` para el
+  path exacto (con el endpoint como instancia de clase, para que Starlette lo
+  trate como app ASGI en vez de envolverlo en `request_response`) y el `Mount`
+  detrás para la forma con barra y cualquier subpath.
+- **`tools/bmya-keys.py` interpolaba `--server-url` tal cual** en los dos
+  snippets de onboarding, así que un `--server-url .../mcp` le llegaba roto al
+  cliente. Nueva `normalize_server_url()`, aplicada en un único lugar
+  (`render_client_snippets`, por donde pasan `new` y `snippet`, y con ellos
+  también `$BMYA_MCP_SERVER_URL`). Se mantiene aunque el servidor ya sirva las
+  dos formas: un snippet puede pegarse contra un despliegue sin actualizar.
+- Ejemplos de docs, docstrings y `deploy/.env.example` pasados a la forma con
+  barra final — son de donde se copian los comandos.
+
+## [Unreleased] - 2026-07-27 (bis) — Stack simplificado para Portainer
+
+### Added
+- `deploy/docker-compose.portainer.yml`: copia sin `build:` ni indirección
+  `${VAR:-default}`, con los 6 valores que realmente hacen falta hardcodeados
+  (sin `MCP_GATEWAY_TOKEN`: el control de acceso es la BMYA key). Pensado para
+  pegar directo en el editor de stack de Portainer.
+
+### Fixed
+- **`ODOO_MCP_ALLOWED_METHODS` bloqueaba todos los métodos de negocio en
+  silencio.** `deploy/docker-compose.yml` la declaraba como
+  `"${ODOO_MCP_ALLOWED_METHODS:-}"`, y Compose siempre inyecta esa clave al
+  contenedor (aunque sea `""`) en vez de omitirla cuando no se setea. Como
+  `os.getenv(name, default)` sólo usa `default` si la clave está **ausente**,
+  el contenedor recibía `ODOO_MCP_ALLOWED_METHODS=""` — "ningún método
+  permitido" — en lugar de caer a los 3 defaults documentados
+  (`calendar.event.action_sync_timesheets`, `account.move.action_post`,
+  `sale.order.action_confirm`). Verificado con `docker compose config` antes y
+  después del fix. Se sacó la línea del compose y se corrigió el comentario en
+  `deploy/.env.example`, que afirmaba lo contrario.
+
 ## [Unreleased] - 2026-07-27 — Onboarding de clientes de bajo esfuerzo
 
 ### Removed

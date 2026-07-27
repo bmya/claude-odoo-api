@@ -47,7 +47,7 @@ sección explica el porqué de cada una.
 ### Opción A — Claude Code (un solo comando, recomendado)
 
 ```bash
-claude mcp add --transport http odoo-clienteX https://odoo-mcp.bmya.cloud/mcp \
+claude mcp add --transport http odoo-clienteX https://odoo-mcp.bmya.cloud/mcp/ \
   --header "X-Bmya-Api-Key: bmya_ro_a3f19c_..." \
   --header "X-Odoo-Api-Key: TU_API_KEY_PERSONAL"
 ```
@@ -69,7 +69,7 @@ completo:
     "odoo-clienteX": {
       "command": "npx",
       "args": [
-        "-y", "mcp-remote", "https://odoo-mcp.bmya.cloud/mcp", "--transport", "http-only",
+        "-y", "mcp-remote", "https://odoo-mcp.bmya.cloud/mcp/", "--transport", "http-only",
         "--header", "X-Bmya-Api-Key: bmya_ro_a3f19c_...",
         "--header", "X-Odoo-Api-Key: TU_API_KEY_PERSONAL"
       ]
@@ -115,7 +115,7 @@ lo que usa el healthcheck del contenedor.
 Smoke test del handshake MCP y una tool de lectura:
 
 ```bash
-BASE=http://localhost:8080/mcp
+BASE=http://localhost:8080/mcp/
 HDR=(-H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
      -H "X-Bmya-Api-Key: $BMYA_KEY" \
      -H "X-Odoo-Api-Key: $ODOO_KEY")
@@ -139,6 +139,7 @@ curl -s "${HDR[@]}" -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
 | `Error: This BMYA API key is bound to ...` | Estás mandando `X-Odoo-Url` / `X-Odoo-Database`. Quitalos. |
 | `Error: Model '...' is not available` | Ese modelo está excluido para tu key. |
 | `Error: Method '...' is not allowed` | Ese método de negocio no está habilitado para tu key. |
+| Se queda en `Connecting to remote server...` y nunca conecta (en la app: *"Could not attach to MCP server"*) | La URL termina sin `/`. Contra un servidor viejo, el path desnudo respondía un 307 hacia la forma con barra y `mcp-remote` no sigue redirects. Usá `https://odoo-mcp.bmya.cloud/mcp/`. Desde 2026-07 el servidor sirve las dos formas directo, así que esto sólo aplica a despliegues sin actualizar. |
 
 ## Notas
 

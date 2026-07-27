@@ -21,7 +21,13 @@ services:
       MCP_FORWARDED_ALLOW_IPS: "${TRAEFIK_HOST_IP:-127.0.0.1}"
       MCP_GATEWAY_TOKEN: "${MCP_GATEWAY_TOKEN:-}"
       ODOO_MCP_READONLY: "${ODOO_MCP_READONLY:-1}"
-      ODOO_MCP_ALLOWED_METHODS: "${ODOO_MCP_ALLOWED_METHODS:-}"
+      # Deliberately NOT set here. "${VAR:-}" always injects the key into the
+      # container, even as an empty string, and os.getenv(name, default) only
+      # falls back to `default` when the key is absent -- an explicit "" means
+      # "no methods at all", silently blocking every odoo_call_method call.
+      # Add this line yourself with a real value only if you want to restrict
+      # the built-in defaults (calendar.event.action_sync_timesheets,
+      # account.move.action_post, sale.order.action_confirm).
       ODOO_REQUEST_TIMEOUT: "30"
       ODOO_MAX_RETRIES: "3"
     read_only: true

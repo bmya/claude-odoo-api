@@ -52,6 +52,88 @@ class TestSlugify:
         assert bmya_keys_cli._slugify("!!!", "fallback") == "fallback"
 
 
+class TestNormalizeServerUrl:
+    def test_adds_a_missing_trailing_slash(self):
+        assert (
+            bmya_keys_cli.normalize_server_url("https://mcp.bmya.cloud/mcp")
+            == "https://mcp.bmya.cloud/mcp/"
+        )
+
+    def test_leaves_an_existing_slash_alone(self):
+        assert (
+            bmya_keys_cli.normalize_server_url("https://mcp.bmya.cloud/mcp/")
+            == "https://mcp.bmya.cloud/mcp/"
+        )
+
+    def test_trims_surrounding_whitespace(self):
+        assert (
+            bmya_keys_cli.normalize_server_url("  https://mcp.bmya.cloud/mcp \n")
+            == "https://mcp.bmya.cloud/mcp/"
+        )
+
+    def test_empty_stays_empty(self):
+        """cmd_new treats "" as "no server url"; it must not become "/"."""
+        assert bmya_keys_cli.normalize_server_url("") == ""
+        assert bmya_keys_cli.normalize_server_url(None) == ""
+
+
+class TestSnippetUrlsAlwaysEndInASlash:
+    """Regression guard, verified 2026-07-27: mcp-remote does not follow the
+    307 that the bare path used to answer with, so a snippet built from
+    ".../mcp" left Claude Desktop stuck on "Connecting to remote server...".
+    Both snippets must carry the trailing-slash form however it was passed."""
+
+    def _render(self, server_url):
+        return bmya_keys_cli.render_client_snippets(
+            name="odoo-clientex",
+            server_url=server_url,
+            bmya_key="bmya_ro_abc123_secretsecretsecretsecretsecretsecretsecret",
+        )
+
+    @pytest.mark.parametrize(
+        "given", ["https://mcp.bmya.cloud/mcp", "https://mcp.bmya.cloud/mcp/"]
+    )
+    def test_claude_code_command_uses_the_slash_form(self, given):
+        text = self._render(given)
+        assert "https://mcp.bmya.cloud/mcp/ \\" in text
+        assert "https://mcp.bmya.cloud/mcp \\" not in text
+
+    @pytest.mark.parametrize(
+        "given", ["https://mcp.bmya.cloud/mcp", "https://mcp.bmya.cloud/mcp/"]
+    )
+    def test_desktop_args_use_the_slash_form(self, given):
+        text = self._render(given)
+        start = text.index('{\n  "mcpServers"')
+        end = text.index("\n\nPara verificar")
+        args = json.loads(text[start:end])["mcpServers"]["odoo-clientex"]["args"]
+        assert "https://mcp.bmya.cloud/mcp/" in args
+        assert "https://mcp.bmya.cloud/mcp" not in args
+
+    def test_cmd_new_normalizes_too(self, tmp_path, capsys, monkeypatch):
+        """The path an operator actually takes: `new --server-url .../mcp`."""
+        monkeypatch.setattr(bmya_auth, "BMYA_ALLOWED_URL_SUFFIXES", ())
+        args = bmya_keys_cli.argparse.Namespace(
+            file=str(tmp_path / "reg.json"),
+            database="clientex_prod",
+            url="https://clientex.bmya.cloud",
+            mode="readonly",
+            label="ClienteX lectura",
+            expires=None,
+            methods=None,
+            allow_models=None,
+            deny_models=None,
+            notes=None,
+            client_name=None,
+            server_url="https://mcp.bmya.cloud/mcp",
+            write=False,
+            json=False,
+        )
+        bmya_keys_cli.cmd_new(args)
+        out = capsys.readouterr().out
+        assert "https://mcp.bmya.cloud/mcp/ \\" in out
+        assert '"https://mcp.bmya.cloud/mcp"' not in out
+
+
 class TestRenderClientSnippets:
     def _render(self):
         return bmya_keys_cli.render_client_snippets(
@@ -86,7 +168,8 @@ class TestRenderClientSnippets:
         assert set(entry.keys()) == {"command", "args"}
         assert entry["command"] == "npx"
         assert "mcp-remote" in entry["args"]
-        assert "https://odoo-mcp.bmya.cloud/mcp" in entry["args"]
+        # Normalized: see TestSnippetUrlsAlwaysEndInASlash for why.
+        assert "https://odoo-mcp.bmya.cloud/mcp/" in entry["args"]
 
     def test_key_and_url_are_baked_into_the_desktop_args(self):
         text = self._render()

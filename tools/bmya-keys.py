@@ -9,11 +9,11 @@ lost, revoke it and mint a new one.
 Usage:
     bmya-keys.py new --database clientex_prod --url https://clientex.bmya.cloud \
                      --mode readonly --label "ClienteX lectura" --write \
-                     --server-url https://odoo-mcp.bmya.cloud/mcp
+                     --server-url https://odoo-mcp.bmya.cloud/mcp/
     bmya-keys.py list
     bmya-keys.py revoke a3f19c --write
     bmya-keys.py verify --stdin
-    bmya-keys.py snippet --stdin --server-url https://odoo-mcp.bmya.cloud/mcp
+    bmya-keys.py snippet --stdin --server-url https://odoo-mcp.bmya.cloud/mcp/
     bmya-keys.py validate
 
 Every subcommand reads the registry from --file, falling back to
@@ -25,7 +25,9 @@ ready-to-send block with both onboarding paths: a one-line `claude mcp add` for
 Claude Code, and an mcp-remote-wrapped JSON block for Claude Desktop. Desktop's
 claude_desktop_config.json only accepts stdio entries (command/args/env) --
 verified against that app's own schema -- it has no native "http + headers"
-support, so its snippet always goes through the mcp-remote bridge.
+support, so its snippet always goes through the mcp-remote bridge. The URL is
+normalized to end in "/" before it reaches either snippet (see
+normalize_server_url), so passing it either way is safe.
 
 Exit codes: 0 ok, 1 validation/runtime error, 2 usage error.
 """
@@ -48,6 +50,8 @@ EXIT_ERROR = 1
 EXIT_USAGE = 2
 
 DEFAULT_FILE = os.getenv("BMYA_API_KEYS_FILE") or "bmya-api-keys.json"
+# Deliberately raw: every use funnels through render_client_snippets(), which
+# normalizes the trailing slash, so there is exactly one place that does it.
 DEFAULT_SERVER_URL = os.getenv("BMYA_MCP_SERVER_URL") or ""
 
 
@@ -128,6 +132,27 @@ def _slugify(text, fallback: str) -> str:
     return text or fallback
 
 
+def normalize_server_url(server_url: str) -> str:
+    """Return the endpoint URL with its trailing slash guaranteed.
+
+    Verified 2026-07-27: the server mounts the MCP transport with Starlette's
+    Mount, which answers the bare path with a 307 to the trailing-slash form,
+    and mcp-remote -- the stdio bridge Claude Desktop needs -- does not follow
+    redirects. A snippet built from ".../mcp" leaves the app stuck on
+    "Connecting to remote server..." and surfaces as "Could not attach to MCP
+    server"; the same URL with the slash connects.
+
+    build_http_app() now also serves the bare path directly, so the slash is no
+    longer load-bearing against a current deployment. This stays because a
+    snippet may be pasted against an older server, and because the operator
+    passing --server-url has no reason to know any of the above.
+    """
+    server_url = (server_url or "").strip()
+    if not server_url or server_url.endswith("/"):
+        return server_url
+    return server_url + "/"
+
+
 def render_client_snippets(*, name: str, server_url: str, bmya_key: str) -> str:
     """A ready-to-send block covering both onboarding paths for one key.
 
@@ -137,7 +162,11 @@ def render_client_snippets(*, name: str, server_url: str, bmya_key: str) -> str:
     does not: its schema only accepts stdio entries (command/args/env), so its
     path goes through the mcp-remote stdio bridge instead. Both are shown
     because we cannot tell which client a given recipient uses.
+
+    The single place server_url is normalized: both snippets are built from the
+    normalized value, so neither can ship a URL the client cannot connect to.
     """
+    server_url = normalize_server_url(server_url)
     code_cmd = (
         f"claude mcp add --transport http {name} {server_url} \\\n"
         f'  --header "X-Bmya-Api-Key: {bmya_key}" \\\n'
@@ -491,8 +520,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_new.add_argument(
         "--server-url",
-        help="public MCP endpoint (e.g. https://odoo-mcp.bmya.cloud/mcp); if set "
-        "(or $BMYA_MCP_SERVER_URL is), also prints ready-to-send client snippets",
+        help="public MCP endpoint (e.g. https://odoo-mcp.bmya.cloud/mcp/); if set "
+        "(or $BMYA_MCP_SERVER_URL is), also prints ready-to-send client snippets "
+        "(a missing trailing slash is added)",
     )
     p_new.add_argument("--write", action="store_true", help="append it to the registry")
     p_new.add_argument("--json", action="store_true", help="machine-readable output")
@@ -528,7 +558,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_snippet.add_argument("--stdin", action="store_true", help="read the key from stdin")
     p_snippet.add_argument(
         "--server-url",
-        help="public MCP endpoint; falls back to $BMYA_MCP_SERVER_URL",
+        help="public MCP endpoint (a missing trailing slash is added); "
+        "falls back to $BMYA_MCP_SERVER_URL",
     )
     p_snippet.add_argument("--name", help="override the MCP server name used in the snippets")
     p_snippet.set_defaults(func=cmd_snippet)

@@ -36,10 +36,16 @@ def no_gateway_token(monkeypatch):
 
 
 @pytest.fixture
-def client(auth_env, no_gateway_token):
+def client_factory(auth_env, no_gateway_token):
+    """Build the app late, so a test can patch module-level settings first."""
+    return lambda: TestClient(odoo_mcp_server.build_http_app())
+
+
+@pytest.fixture
+def client(client_factory):
     """A TestClient over the real app. The context manager runs the lifespan,
     which the streamable-HTTP session manager needs."""
-    with TestClient(odoo_mcp_server.build_http_app()) as test_client:
+    with client_factory() as test_client:
         yield test_client
 
 
@@ -125,6 +131,44 @@ class TestBmyaKeyAuthentication:
         auth_env.write_text(json.dumps(data), encoding="utf-8")
 
         assert post_mcp(client, **{"X-Bmya-Api-Key": KEY_RO}).status_code == 401
+
+
+class TestEndpointPaths:
+    """Both /mcp and /mcp/ must serve the transport, with no redirect between
+    them. A lone Mount answers the bare path with a 307, and mcp-remote (the
+    stdio bridge Claude Desktop needs) does not follow redirects: it hangs on
+    "Connecting to remote server..." forever. Every request here disables
+    redirect-following, which is what the real client does."""
+
+    @pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+    def test_both_forms_are_served_directly(self, client, path):
+        response = client.post(
+            path,
+            json=INITIALIZE,
+            headers={**MCP_HEADERS, "X-Bmya-Api-Key": KEY_RO},
+            follow_redirects=False,
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
+    def test_both_forms_are_authenticated(self, client, path):
+        """The bare path must not become an unauthenticated back door."""
+        response = client.post(
+            path, json=INITIALIZE, headers=MCP_HEADERS, follow_redirects=False
+        )
+        assert response.status_code == 401
+
+    def test_custom_mcp_http_path_serves_both_forms(self, client_factory, monkeypatch):
+        monkeypatch.setattr(odoo_mcp_server, "MCP_HTTP_PATH", "/odoo/mcp")
+        with client_factory() as test_client:
+            for path in ("/odoo/mcp", "/odoo/mcp/"):
+                response = test_client.post(
+                    path,
+                    json=INITIALIZE,
+                    headers={**MCP_HEADERS, "X-Bmya-Api-Key": KEY_RO},
+                    follow_redirects=False,
+                )
+                assert response.status_code == 200, path
 
 
 class TestGatewayToken:
