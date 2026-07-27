@@ -1,46 +1,55 @@
 # Conectarse al servidor MCP Odoo remoto (transporte HTTP)
 
-En modo HTTP el servidor **no guarda credenciales**. Cada usuario envía su propia
-instancia de Odoo (URL, base de datos, API key) como **headers HTTP** desde su
-configuración MCP local. Así cada quien queda sujeto a sus permisos de Odoo y
-puede apuntar a varias bases (incluidas las de clientes) agregando una entrada
-por instancia.
+El servidor corre en un solo lugar y lo comparten varios usuarios y varias bases.
+**No guarda credenciales de Odoo**: cada request las trae.
 
 ## Headers
 
-| Header            | Requerido | Descripción                                              |
-|-------------------|-----------|----------------------------------------------------------|
-| `X-Odoo-Url`      | sí        | URL del Odoo (p. ej. `https://clienteX.bmya.cloud`)      |
-| `X-Odoo-Database` | sí        | Nombre de la base de datos                               |
-| `X-Odoo-Api-Key`  | sí        | **Tu** API key personal de Odoo (define tus permisos)    |
-| `X-Gateway-Token` | opcional  | Solo si el servidor tiene `MCP_GATEWAY_TOKEN` configurado |
+| Header | Requerido | Descripción |
+|---|---|---|
+| `X-Bmya-Api-Key` | sí | La key que emite BMYA. Determina, del lado servidor, **a qué instancia y base** se conecta la sesión, y si es de lectura o de escritura. |
+| `X-Odoo-Api-Key` | sí | **Tu** API key personal de Odoo. Define tus permisos y deja la auditoría a tu nombre dentro de Odoo. |
+| `X-Odoo-Mode` | opcional | `readonly` para restringirte a lectura aunque tu key permita escribir. **Sólo restringe**: pedir `readwrite` con una key de lectura no hace nada. |
+| `X-Gateway-Token` | opcional | Sólo si el servidor tiene `MCP_GATEWAY_TOKEN` configurado. |
 
-> La API key de Odoo se genera en Odoo: *Preferencias de usuario → Seguridad de
-> la cuenta → Nueva API key*. Es personal e intransferible.
+> **`X-Odoo-Url` y `X-Odoo-Database` ya no se envían.** Los aporta la BMYA key.
+> Si los mandás y no coinciden con tu key, el pedido se rechaza en vez de
+> ignorarse en silencio, para que nunca creas que estás leyendo una base cuando
+> en realidad es otra.
+
+## Cómo obtener cada cosa
+
+La **BMYA API key** la entrega BMYA, una por base y por modo:
+
+```
+bmya_ro_a3f19c_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX   (lectura)
+bmya_rw_b7e204_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX   (escritura)
+```
+
+La **API key de Odoo** la generás vos en tu propio usuario: *Preferencias de
+usuario → Seguridad de la cuenta → Nueva API key*. Es personal e intransferible.
 
 ## Config del cliente MCP
 
-Una entrada por cada base/cliente que uses. Ejemplo (Claude Desktop / Claude Code):
+Una entrada por cada base que uses, todas al mismo servidor, diferenciadas
+únicamente por la BMYA key (Claude Desktop / Claude Code):
 
 ```json
 {
   "mcpServers": {
     "odoo-clienteX": {
       "type": "http",
-      "url": "https://odoo-mcp.bmya.cl/mcp",
+      "url": "https://odoo-mcp.bmya.cloud/mcp",
       "headers": {
-        "X-Odoo-Url": "https://clienteX.bmya.cloud",
-        "X-Odoo-Database": "clienteX_db",
-        "X-Odoo-Api-Key": "TU_API_KEY_PERSONAL",
-        "X-Gateway-Token": "SOLO_SI_ESTA_CONFIGURADO"
+        "X-Bmya-Api-Key": "bmya_ro_a3f19c_...",
+        "X-Odoo-Api-Key": "TU_API_KEY_PERSONAL"
       }
     },
-    "odoo-otrocliente": {
+    "odoo-clienteX-escritura": {
       "type": "http",
-      "url": "https://odoo-mcp.bmya.cl/mcp",
+      "url": "https://odoo-mcp.bmya.cloud/mcp",
       "headers": {
-        "X-Odoo-Url": "https://otro.bmya.cloud",
-        "X-Odoo-Database": "otro_db",
+        "X-Bmya-Api-Key": "bmya_rw_b7e204_...",
         "X-Odoo-Api-Key": "TU_API_KEY_PERSONAL"
       }
     }
@@ -48,35 +57,75 @@ Una entrada por cada base/cliente que uses. Ejemplo (Claude Desktop / Claude Cod
 }
 ```
 
-## Prueba local (Fase 1)
+Con una key de sólo lectura el servidor **ni siquiera lista** las herramientas de
+escritura (`odoo_create`, `odoo_write`, `odoo_unlink`, `odoo_call_method`), así
+que el modelo no las intenta.
 
-Con el contenedor levantado en local (`cd deploy && docker compose up -d --build`
-o `MCP_TRANSPORT=http python src/odoo_mcp_server.py`):
+Para ver contra qué instancia quedaste conectado, pedile al asistente que llame
+`odoo_list_companies`: devuelve la URL, la base, el modo efectivo y los métodos
+habilitados **de tu propia key**, y nada más.
 
-- HTTP:  `http://localhost:8080/mcp`
-- HTTPS (si seteás `MCP_TLS_CERTFILE`/`MCP_TLS_KEYFILE`): `https://localhost:8443/mcp`
+## Prueba local
 
-Verificación rápida del endpoint de salud:
+Con el contenedor levantado (`cd deploy && docker compose up -d --build`) o el
+proceso directo:
+
+```bash
+BMYA_API_KEYS_FILE=./deploy/config/bmya-api-keys.json MCP_TRANSPORT=http \
+  BMYA_ALLOW_INSECURE_URLS=1 python src/odoo_mcp_server.py
+```
+
+Salud y readiness:
 
 ```bash
 curl -s http://localhost:8080/health   # -> {"status":"ok"}
 ```
 
-Smoke test del handshake MCP + una tool de lectura (sin cliente MCP):
+```bash
+curl -s http://localhost:8080/readyz   # -> {"status":"ready","stale":false}
+```
+
+`/health` es sólo liveness. `/readyz` da 503 si el registro de keys no cargó, y es
+lo que usa el healthcheck del contenedor.
+
+Smoke test del handshake MCP y una tool de lectura:
 
 ```bash
 BASE=http://localhost:8080/mcp
 HDR=(-H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
-     -H "X-Odoo-Url: http://host.docker.internal:8069" \
-     -H "X-Odoo-Database: TU_DB" \
-     -H "X-Odoo-Api-Key: TU_API_KEY")
+     -H "X-Bmya-Api-Key: $BMYA_KEY" \
+     -H "X-Odoo-Api-Key: $ODOO_KEY")
 
-# initialize
 curl -s "${HDR[@]}" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' "$BASE"
+```
 
-# tools/call -> search_count
+```bash
 curl -s "${HDR[@]}" -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"odoo_search_count","arguments":{"model":"res.partner","domain":[]}}}' "$BASE"
 ```
 
-En modo stateless cada request es independiente; los headers de credenciales
-viajan en cada llamada.
+## Si algo falla
+
+| Qué ves | Qué significa |
+|---|---|
+| **401** `{"error":"unauthorized"}` | Falta `X-Bmya-Api-Key`, está mal escrita, fue revocada o venció. El servidor devuelve el mismo mensaje en los cuatro casos, a propósito: no informa cuál. Pedí una key nueva. |
+| **401** con la key correcta | Si hay `MCP_GATEWAY_TOKEN` configurado, también hay que mandar `X-Gateway-Token`. |
+| **503** `{"error":"service_unavailable"}` | El registro de keys no está disponible en el servidor. No es tu configuración. |
+| `Error: Missing X-Odoo-Api-Key header` | La BMYA key validó, pero falta *tu* API key de Odoo. |
+| `Error: Read-only connection` | Tu key es de lectura, o el servidor está en modo lectura global (`ODOO_MCP_READONLY`). |
+| `Error: This BMYA API key is bound to ...` | Estás mandando `X-Odoo-Url` / `X-Odoo-Database`. Quitalos. |
+| `Error: Model '...' is not available` | Ese modelo está excluido para tu key. |
+| `Error: Method '...' is not allowed` | Ese método de negocio no está habilitado para tu key. |
+
+## Notas
+
+- El transporte es **stateless**: los headers viajan en cada request y no hay
+  sesión que expire del lado del servidor.
+- Revocar un acceso lo hace BMYA editando el registro; la key deja de funcionar en
+  segundos, sin reiniciar el servidor y sin que el cliente tenga que hacer nada.
+- Si se te filtró una BMYA key, avisá para revocarla. Tu API key de Odoo la
+  revocás vos desde Odoo.
+
+## Ver también
+
+- [bmya-api-keys.md](bmya-api-keys.md) — operación del registro de keys (BMYA).
+- [../deploy/README.md](../deploy/README.md) — despliegue del servidor.

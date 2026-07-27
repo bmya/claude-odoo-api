@@ -193,19 +193,75 @@ Configuration loading:
 
 The server supports two transports, selected by `MCP_TRANSPORT` (default `stdio`):
 
-- **stdio** (default): one process per user, launched by the Claude app via `docker run -i`. Credentials come from the mounted multi-company `.env` (see above) and the tool `company` argument selects a section. Unchanged legacy behavior.
-- **http** (`MCP_TRANSPORT=http`): Streamable HTTP served by uvicorn/Starlette (`run_http()` in `src/odoo_mcp_server.py`) at `MCP_HTTP_PATH` (default `/mcp`), for a shared/remote deployment. The server stores **no** Odoo credentials — each user sends their own instance as connection headers `X-Odoo-Url` / `X-Odoo-Database` / `X-Odoo-Api-Key`, so every user is bound to their own Odoo permissions and can target multiple databases (one MCP client entry per instance). See [docs/remote-client-config.md](docs/remote-client-config.md).
+- **stdio** (default): one process per user, launched by the Claude app via `docker run -i`. Credentials come from the mounted multi-company `.env` (see above) and the tool `company` argument selects a section. Unchanged legacy behavior — **no BMYA key is involved in stdio mode**.
+- **http** (`MCP_TRANSPORT=http`): Streamable HTTP served by uvicorn/Starlette (`build_http_app()` / `run_http()` in `src/odoo_mcp_server.py`) at `MCP_HTTP_PATH` (default `/mcp`), for the shared bmya.cloud deployment.
 
-Key HTTP-mode internals (all in `src/odoo_mcp_server.py`):
-- `resolve_odoo_client(arguments)` reads the `X-Odoo-*` headers from `app.request_context.request.headers`; falls back to `.env`/`company` when there are no headers (stdio). The `company` tool argument is optional and ignored in HTTP mode.
-- Clients are cached by a **SHA-256 hash of `(url|database|api_key)`** (not by company name) via `_get_or_create_client()`, so tenants never share a cached client.
-- Runs **stateless** (`StreamableHTTPSessionManager(stateless=True)`): each request is independent; credential headers travel on every request.
-- `GET /health` returns `{"status":"ok"}` (real container healthcheck).
-- **TLS**: serves plain HTTP behind a TLS-terminating reverse proxy (Traefik) with `proxy_headers=True` (honors `X-Forwarded-Proto`). Set `MCP_TLS_CERTFILE`/`MCP_TLS_KEYFILE` to serve HTTPS directly (e.g. self-signed for local tests).
-- **Gateway token** (optional, reconfigurable front door): if `MCP_GATEWAY_TOKEN` is set, requests must carry a matching `X-Gateway-Token` header (`/health` exempt); otherwise access relies on the network gate (Twingate/VLAN).
-- The `ODOO_MCP_READONLY` and `ODOO_MCP_ALLOWED_METHODS` guardrails are server-level and apply to every user/connection.
+In HTTP mode each request carries **two** credentials and the server stores neither:
 
-HTTP server-level env vars are documented in `.env.http.example` (no Odoo credentials there). The `.env` INI is only for stdio mode.
+| Header | Supplies |
+|---|---|
+| `X-Bmya-Api-Key` | The BMYA-issued key. Resolves server-side to a `Grant`: the Odoo URL, the database, the mode (readonly/readwrite), and optional method/model policy. |
+| `X-Odoo-Api-Key` | The user's own personal Odoo API key, so Odoo-side permissions and the audit trail stay per-user. |
+| `X-Odoo-Mode` | Optional, **narrowing only** (`readonly`). |
+| `X-Gateway-Token` | Optional shared front door, when `MCP_GATEWAY_TOKEN` is set. |
+
+`X-Odoo-Url` / `X-Odoo-Database` are **no longer sent by clients**: the grant pins them. That is what removes the SSRF surface (previously any caller past the gateway token could point the server at any reachable host). Legacy headers that *contradict* the grant are rejected rather than ignored, so a user can never believe they are reading database A while the server reads B.
+
+See [docs/remote-client-config.md](docs/remote-client-config.md) (clients), [docs/bmya-api-keys.md](docs/bmya-api-keys.md) (registry operation) and [deploy/README.md](deploy/README.md) (deployment).
+
+#### Authorization layer (`src/bmya_auth.py`)
+
+Standalone module — it never imports `odoo_mcp_server`, so the dependency runs one way and it is testable alone.
+
+- **Registry**: JSON file at `BMYA_API_KEYS_FILE`, holding only `sha256(key)` per grant, never the key. Loaded via `get_registry()`, which is **the only function that knows where grants come from** — the seam for the planned phase 2 that validates keys against `www.bmya.cl` (dispatch on `BMYA_KEYS_BACKEND`; `resolve_grant`, the middleware and `call_tool` stay untouched).
+- **Hot reload**: re-read when the source's `(mtime_ns, size)` changes, at most every `BMYA_REGISTRY_TTL_SECONDS` (default 10). `SIGHUP` reloads immediately. A failed reload **keeps the last good snapshot**, logs an ERROR and sets the `stale` flag (availability over freshness), and `RegistryUnavailable` is raised only when nothing was ever loaded.
+- **Mode precedence**: `effective_mode()` returns the most restrictive of (server `ODOO_MCP_READONLY`, grant mode, client `X-Odoo-Mode`). Widening is structurally impossible.
+- **Method policy**: `effective_allowed_methods()` intersects the grant's list with `ODOO_MCP_ALLOWED_METHODS`, so a grant can only narrow it. `allowed_methods` absent/`null` means *inherit the server list*; `[]` means *no methods*. That is the one place where absent ≠ empty.
+- **Model policy**: `allowed_models` (allowlist) and `denied_models`, the latter applied last and always winning.
+
+#### Two enforcement points, and why
+
+| Layer | Job |
+|---|---|
+| `BmyaAuthMiddleware` (**pure ASGI**) | Authentication + fail fast: gateway token and BMYA key must be present, known, not revoked, not expired → else 401 before the MCP session manager is touched. 503 when the registry was never loaded. `/health` and `/readyz` exempt. |
+| `call_tool` / `list_tools` | Authorization: independently re-resolves the grant and decides url/database, mode, methods, models. |
+
+The middleware is **pure ASGI, not `BaseHTTPMiddleware`**, and it deliberately does **not** pass the grant down via a ContextVar. `BaseHTTPMiddleware` runs the downstream app in a separate anyio task and wraps the response stream (bad for SSE), and in stateless mode `StreamableHTTPSessionManager` starts the per-request MCP task from the *lifespan* task group — so whether a ContextVar reaches the tool handler is an undocumented SDK internal. If an SDK bump broke it, "grant present" would silently become "grant is None", which with a naive `.env` fallback would be a **privilege escalation**. Re-resolving from the headers is a strip, a sha256, a dict lookup and a `compare_digest`, so the duplication is free and the tool layer stays authoritative. Do not "simplify" this back.
+
+**Fail-closed invariant** (the most important line in the change): in `call_tool`, HTTP transport + `BMYA_AUTH_ENABLED` + unresolvable grant ⇒ deny. Never fall through to the `.env`/`company` path when headers are present; `resolve_odoo_client()` raises `AuthError` on that branch rather than continuing.
+
+Authorization is resolved **before** the tool-name branch. `odoo_list_companies` used to be answered first and leaked the server's `.env` section names to unauthenticated callers; under a grant it now reports only that grant's own instance.
+
+#### Failure semantics
+
+| Condition | Result |
+|---|---|
+| Missing / malformed / unknown / revoked / expired key | **401** `{"error":"unauthorized"}` — byte-identical in all five cases, so a caller cannot probe which. `AuthError.reason` distinguishes them in the log, with `key_id` only. |
+| Registry never loaded | **503** `{"error":"service_unavailable"}`; `/readyz` 503; container healthcheck goes unhealthy. |
+| Authenticated but not authorized (mode, model, method, header mismatch) | `ToolDenied` → a `TextContent` error whose message *is* meant for the user. |
+| Odoo-side errors | Unchanged: `_make_request`'s `ValueError`/`TimeoutError`/`ConnectionError` messages are still surfaced verbatim (they are the useful diagnostics), now with `exc_info` in the log. |
+
+`call_tool` catches `AuthError` / `RegistryUnavailable` / `ToolDenied` **before** the catch-all, so an auth failure can never be masked as a business error.
+
+#### Other HTTP-mode internals
+
+- `list_tools()` hides the four `WRITE_TOOLS` from a read-only connection, so the model never attempts one. A usability measure, not the control — `call_tool` enforces regardless.
+- Per-credential clients live in a **bounded LRU** `_http_clients` (`ODOO_CLIENT_CACHE_MAX`, default 256), keyed by `sha256(url|database|api_key)` and closing the session on eviction. Kept separate from `odoo_clients` (company-name keyed, stdio) so the two namespaces never mix.
+- Runs **stateless**: each request is independent; both credential headers travel on every request.
+- `GET /health` = liveness `{"status":"ok"}`. `GET /readyz` = readiness, 503 unless a registry snapshot exists. The container healthcheck uses **`/readyz`**, so a bad registry mount fails the deploy loudly instead of silently 401-ing every client.
+- **TLS**: serves plain HTTP behind a TLS-terminating proxy with `proxy_headers=True`. `MCP_FORWARDED_ALLOW_IPS` now defaults to `127.0.0.1` (not `*`) and must be set to the proxy's address.
+- Audit log per call: `key_id`, database, tool, effective mode, allow/deny. Never a key, a hash, or the user's Odoo key.
+- `BMYA_AUTH_ENABLED=0` is a documented rollback to the old three-header behavior; it is covered by tests so the path is verified rather than hoped for.
+
+HTTP server-level env vars are documented in `.env.http.example`, and the deployment ones in `deploy/.env.example`. The `.env` INI is only for stdio mode.
+
+#### Deployment shape
+
+Traefik runs on a **separate host** and reaches this server over the VLAN (virtual-host style), so `deploy/` carries no Docker labels and no shared network — just a port published on the VLAN address (`MCP_BIND_ADDR`, default `10.0.0.14`). Proxy-side requirements (no response buffering, generous SSE timeouts, rate limiting, HSTS) are documented in `deploy/README.md`.
+
+The registry is mounted as a **directory** (`./config:/app/config:ro`), never as a single file: a single-file bind mount pins the inode, and since `tools/bmya-keys.py` rewrites atomically (tempfile + rename), the container would keep reading the old unlinked inode and **revocation would never take effect**. This was verified in a container: with a file mount a revoked key kept returning 200; with a directory mount it returns 401.
+
+`tools/bmya-keys.py` mints (`new`), inspects (`list`, `verify`), revokes (`revoke`) and validates (`validate`) the registry. Mutating commands are dry-run unless `--write`. `verify` reads the key from stdin, never argv, to keep it out of shell history. `validate` is a CI step and a pre-deploy gate.
 
 ## Development Commands
 

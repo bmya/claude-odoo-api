@@ -19,3 +19,7 @@ venv
 .DS_Store
 create_odoo_invoices.py
 salida.json
+
+# Never bake a key registry into the image (the build context is the repo root).
+deploy/config/
+deploy/.env

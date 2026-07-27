@@ -19,6 +19,22 @@ from odoo_mcp_server import (
     list_available_companies
 )
 
+# The full tool set the server exposes.
+EXPECTED_TOOLS = {
+    "odoo_list_companies",
+    "odoo_search_read",
+    "odoo_create",
+    "odoo_write",
+    "odoo_unlink",
+    "odoo_search",
+    "odoo_read",
+    "odoo_search_count",
+    "odoo_list_models",
+    "odoo_fields_get",
+    "odoo_name_search",
+    "odoo_call_method",
+}
+
 
 class TestOdooClient:
     """Tests for OdooClient class"""
@@ -367,21 +383,9 @@ class TestMCPToolIntegration:
 
         tools = await list_tools()
 
-        assert len(tools) == 12
-        tool_names = [tool.name for tool in tools]
-
-        assert "odoo_list_companies" in tool_names
-        assert "odoo_search_read" in tool_names
-        assert "odoo_create" in tool_names
-        assert "odoo_write" in tool_names
-        assert "odoo_unlink" in tool_names
-        assert "odoo_search" in tool_names
-        assert "odoo_read" in tool_names
-        assert "odoo_search_count" in tool_names
-        assert "odoo_list_models" in tool_names
-        assert "odoo_fields_get" in tool_names
-        assert "odoo_name_search" in tool_names
-        assert "odoo_call_method" in tool_names
+        # Compare the whole set rather than a bare count, so a rename fails
+        # loudly instead of a counter silently drifting.
+        assert {tool.name for tool in tools} == EXPECTED_TOOLS
 
     @pytest.mark.asyncio
     async def test_call_list_companies(self, temp_env_file):
@@ -399,15 +403,16 @@ class TestMCPToolIntegration:
         assert "Total: 1" in result[0].text
 
     @pytest.mark.asyncio
-    async def test_call_tool_without_company(self):
-        """Test that tools require company parameter"""
+    async def test_call_tool_without_credentials(self):
+        """A tool call with neither credential headers nor a company is refused"""
         from odoo_mcp_server import call_tool
 
         result = await call_tool("odoo_search_read", {"model": "res.partner"})
 
         assert len(result) == 1
         assert "Error" in result[0].text
-        assert "Company parameter is required" in result[0].text
+        assert "No Odoo credentials provided" in result[0].text
+        assert "company" in result[0].text
 
 
 class TestIntrospectionTools:
@@ -601,6 +606,460 @@ class TestCallMethod:
         })
 
         assert result[0].text == "Posted"
+
+
+class TestCallToolWithGrant:
+    """Tool-level authorization under a BMYA grant (HTTP transport)."""
+
+    @pytest.fixture
+    def env_with_company(self, tmp_path):
+        """A server .env whose section name must never leak to an HTTP caller."""
+        import odoo_mcp_server
+
+        env_file = tmp_path / "server.env"
+        config = ConfigParser()
+        config.add_section("secret_internal_company")
+        config.set("secret_internal_company", "ODOO_URL", "http://internal:8069")
+        config.set("secret_internal_company", "ODOO_DATABASE", "internal_db")
+        config.set("secret_internal_company", "ODOO_API_KEY", "internal_key")
+        with open(env_file, "w") as handle:
+            config.write(handle)
+
+        original_configs = odoo_mcp_server.company_configs
+        original_file = odoo_mcp_server.CONFIG_FILE
+        odoo_mcp_server.company_configs = {}
+        odoo_mcp_server.CONFIG_FILE = str(env_file)
+        yield env_file
+        odoo_mcp_server.company_configs = original_configs
+        odoo_mcp_server.CONFIG_FILE = original_file
+
+    @pytest.fixture
+    def grant_env(self, auth_env, monkeypatch):
+        """Patch client creation so nothing touches the network, and record args."""
+        import odoo_mcp_server
+
+        client = Mock()
+        client.create = Mock(return_value=1)
+        client.write = Mock(return_value=True)
+        client.unlink = Mock(return_value=True)
+        client.search_read = Mock(return_value=[])
+        client.call_method = Mock(return_value=True)
+
+        calls = []
+
+        def fake_get_or_create(url, database, api_key):
+            calls.append((url, database, api_key))
+            return client
+
+        monkeypatch.setattr(odoo_mcp_server, "_get_or_create_client", fake_get_or_create)
+        monkeypatch.setattr(odoo_mcp_server, "READ_ONLY", False)
+        monkeypatch.setattr(
+            odoo_mcp_server, "ODOO_ALLOWED_METHODS", {"account.move.action_post"}
+        )
+        client.creation_calls = calls
+        return client
+
+    @staticmethod
+    def set_headers(monkeypatch, bmya_key, odoo_key="user-key", **extra):
+        import odoo_mcp_server
+        from starlette.datastructures import Headers
+
+        raw = {"X-Bmya-Api-Key": bmya_key}
+        if odoo_key is not None:
+            raw["X-Odoo-Api-Key"] = odoo_key
+        raw.update(extra)
+        headers = Headers(raw)
+        monkeypatch.setattr(odoo_mcp_server, "_request_headers", lambda: headers)
+        return headers
+
+    # --- The instance is fixed by the key (SSRF surface removed)
+
+    @pytest.mark.asyncio
+    async def test_instance_comes_from_the_grant(self, grant_env, monkeypatch):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RO
+
+        self.set_headers(monkeypatch, KEY_RO)
+        await call_tool("odoo_search_read", {"model": "res.partner"})
+
+        assert grant_env.creation_calls == [
+            ("https://clientex.bmya.cloud", "clientex_prod", "user-key")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_spoofed_url_header_cannot_redirect_the_server(
+        self, grant_env, monkeypatch
+    ):
+        """The SSRF regression: a caller-supplied host must never be used."""
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RO
+
+        self.set_headers(
+            monkeypatch,
+            KEY_RO,
+            **{"X-Odoo-Url": "https://evil.example", "X-Odoo-Database": "evil_db"},
+        )
+        result = await call_tool("odoo_search_read", {"model": "res.partner"})
+
+        assert "Error" in result[0].text
+        assert "evil.example" not in str(grant_env.creation_calls)
+        assert grant_env.creation_calls == []
+        grant_env.search_read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_matching_legacy_headers_are_ignored(self, grant_env, monkeypatch):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RO
+
+        self.set_headers(
+            monkeypatch,
+            KEY_RO,
+            **{
+                "X-Odoo-Url": "https://clientex.bmya.cloud/",
+                "X-Odoo-Database": "clientex_prod",
+            },
+        )
+        await call_tool("odoo_search_read", {"model": "res.partner"})
+
+        assert grant_env.creation_calls == [
+            ("https://clientex.bmya.cloud", "clientex_prod", "user-key")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_company_argument_cannot_escape_the_grant(self, grant_env, monkeypatch):
+        """A grant-bound caller passing 'company' still gets its own instance."""
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RO
+
+        self.set_headers(monkeypatch, KEY_RO)
+        await call_tool(
+            "odoo_search_read", {"model": "res.partner", "company": "secret_internal_company"}
+        )
+
+        assert grant_env.creation_calls == [
+            ("https://clientex.bmya.cloud", "clientex_prod", "user-key")
+        ]
+
+    # --- Mode enforcement
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool,args", [
+        ("odoo_create", {"model": "res.partner", "values": {"name": "X"}}),
+        ("odoo_write", {"model": "res.partner", "ids": [1], "values": {"name": "X"}}),
+        ("odoo_unlink", {"model": "res.partner", "ids": [1]}),
+        ("odoo_call_method", {"model": "account.move", "method": "action_post"}),
+    ])
+    async def test_readonly_grant_blocks_writes(self, grant_env, monkeypatch, tool, args):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RO
+
+        self.set_headers(monkeypatch, KEY_RO)
+        result = await call_tool(tool, args)
+
+        assert "Read-only connection" in result[0].text
+        grant_env.create.assert_not_called()
+        grant_env.write.assert_not_called()
+        grant_env.unlink.assert_not_called()
+        grant_env.call_method.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_readwrite_grant_allows_writes(self, grant_env, monkeypatch):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RW
+
+        self.set_headers(monkeypatch, KEY_RW)
+        result = await call_tool(
+            "odoo_create", {"model": "res.partner", "values": {"name": "X"}}
+        )
+
+        assert "Created record with ID: 1" in result[0].text
+        grant_env.create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_client_can_narrow_itself_to_readonly(self, grant_env, monkeypatch):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RW
+
+        self.set_headers(monkeypatch, KEY_RW, **{"X-Odoo-Mode": "readonly"})
+        result = await call_tool(
+            "odoo_create", {"model": "res.partner", "values": {"name": "X"}}
+        )
+
+        assert "Read-only connection" in result[0].text
+        grant_env.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_client_cannot_widen_a_readonly_grant(self, grant_env, monkeypatch):
+        """Asking for readwrite against a readonly key changes nothing."""
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RO
+
+        self.set_headers(monkeypatch, KEY_RO, **{"X-Odoo-Mode": "readwrite"})
+        result = await call_tool(
+            "odoo_create", {"model": "res.partner", "values": {"name": "X"}}
+        )
+
+        assert "Read-only connection" in result[0].text
+        grant_env.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_server_readonly_overrides_a_readwrite_grant(self, grant_env, monkeypatch):
+        import odoo_mcp_server
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RW
+
+        monkeypatch.setattr(odoo_mcp_server, "READ_ONLY", True)
+        self.set_headers(monkeypatch, KEY_RW)
+        result = await call_tool(
+            "odoo_create", {"model": "res.partner", "values": {"name": "X"}}
+        )
+
+        assert "Read-only connection" in result[0].text
+        grant_env.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_mode_header_denied(self, grant_env, monkeypatch):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RW
+
+        self.set_headers(monkeypatch, KEY_RW, **{"X-Odoo-Mode": "superuser"})
+        result = await call_tool("odoo_search_read", {"model": "res.partner"})
+
+        assert "Unsupported" in result[0].text
+
+    # --- Method and model policy
+
+    @pytest.mark.asyncio
+    async def test_call_method_inside_grant_allowlist(self, grant_env, monkeypatch):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RW
+
+        self.set_headers(monkeypatch, KEY_RW)
+        result = await call_tool(
+            "odoo_call_method", {"model": "account.move", "method": "action_post", "ids": [1]}
+        )
+
+        assert "not allowed" not in result[0].text
+        grant_env.call_method.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_call_method_outside_grant_allowlist(self, grant_env, monkeypatch):
+        """The grant narrows the server list; sale.order is server-allowed but not granted."""
+        import odoo_mcp_server
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RW
+
+        monkeypatch.setattr(
+            odoo_mcp_server,
+            "ODOO_ALLOWED_METHODS",
+            {"account.move.action_post", "sale.order.action_confirm"},
+        )
+        self.set_headers(monkeypatch, KEY_RW)
+        result = await call_tool(
+            "odoo_call_method", {"model": "sale.order", "method": "action_confirm"}
+        )
+
+        assert "not allowed" in result[0].text
+        grant_env.call_method.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_denied_model_blocked(self, grant_env, monkeypatch):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RW
+
+        self.set_headers(monkeypatch, KEY_RW)
+        result = await call_tool("odoo_search_read", {"model": "res.users"})
+
+        assert "not available" in result[0].text
+        grant_env.search_read.assert_not_called()
+
+    # --- Authentication failures at the tool layer
+
+    @pytest.mark.asyncio
+    async def test_revoked_key_gives_the_generic_message(self, grant_env, monkeypatch):
+        import bmya_auth
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_REVOKED
+
+        self.set_headers(monkeypatch, KEY_REVOKED)
+        result = await call_tool("odoo_search_read", {"model": "res.partner"})
+
+        assert result[0].text == f"Error: {bmya_auth.PUBLIC_AUTH_ERROR}"
+        assert grant_env.creation_calls == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_key_gives_the_same_message_as_revoked(
+        self, grant_env, monkeypatch
+    ):
+        import bmya_auth
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_UNKNOWN
+
+        self.set_headers(monkeypatch, KEY_UNKNOWN)
+        result = await call_tool("odoo_search_read", {"model": "res.partner"})
+
+        assert result[0].text == f"Error: {bmya_auth.PUBLIC_AUTH_ERROR}"
+
+    @pytest.mark.asyncio
+    async def test_missing_odoo_api_key_is_actionable(self, grant_env, monkeypatch):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RO
+
+        self.set_headers(monkeypatch, KEY_RO, odoo_key=None)
+        result = await call_tool("odoo_search_read", {"model": "res.partner"})
+
+        assert "X-Odoo-Api-Key" in result[0].text
+        assert grant_env.creation_calls == []
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_to_env_when_grant_missing(self, grant_env, monkeypatch):
+        """With auth on, an unresolvable grant must never fall back to the .env."""
+        import bmya_auth
+        import odoo_mcp_server
+        from odoo_mcp_server import call_tool
+
+        self.set_headers(monkeypatch, "garbage")
+        with patch.object(odoo_mcp_server, "get_odoo_client") as get_client:
+            result = await call_tool(
+                "odoo_search_read", {"model": "res.partner", "company": "whatever"}
+            )
+
+        assert result[0].text == f"Error: {bmya_auth.PUBLIC_AUTH_ERROR}"
+        get_client.assert_not_called()
+
+    # --- The .env leak
+
+    @pytest.mark.asyncio
+    async def test_list_companies_under_grant_does_not_leak_env_sections(
+        self, grant_env, env_with_company, monkeypatch
+    ):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RO
+
+        self.set_headers(monkeypatch, KEY_RO)
+        result = await call_tool("odoo_list_companies", {})
+
+        assert "clientex_prod" in result[0].text
+        assert "https://clientex.bmya.cloud" in result[0].text
+        assert "secret_internal_company" not in result[0].text
+        assert "internal_db" not in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_list_companies_requires_authentication(
+        self, grant_env, env_with_company, monkeypatch
+    ):
+        """It used to be answered before any auth check, leaking .env sections."""
+        import bmya_auth
+        from odoo_mcp_server import call_tool
+
+        self.set_headers(monkeypatch, "garbage")
+        result = await call_tool("odoo_list_companies", {})
+
+        assert result[0].text == f"Error: {bmya_auth.PUBLIC_AUTH_ERROR}"
+        assert "secret_internal_company" not in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_list_companies_describe_hides_secrets(self, grant_env, monkeypatch):
+        from odoo_mcp_server import call_tool
+        from tests.conftest import KEY_RW
+
+        self.set_headers(monkeypatch, KEY_RW)
+        result = await call_tool("odoo_list_companies", {})
+
+        assert KEY_RW not in result[0].text
+        assert "user-key" not in result[0].text
+
+    # --- Tool listing
+
+    @pytest.mark.asyncio
+    async def test_write_tools_hidden_from_readonly_connections(
+        self, grant_env, monkeypatch
+    ):
+        import bmya_auth
+        from odoo_mcp_server import list_tools
+        from tests.conftest import KEY_RO
+
+        self.set_headers(monkeypatch, KEY_RO)
+        names = {tool.name for tool in await list_tools()}
+
+        assert names == EXPECTED_TOOLS - bmya_auth.WRITE_TOOLS
+        assert len(names) == 8
+
+    @pytest.mark.asyncio
+    async def test_all_tools_listed_for_readwrite_connections(
+        self, grant_env, monkeypatch
+    ):
+        from odoo_mcp_server import list_tools
+        from tests.conftest import KEY_RW
+
+        self.set_headers(monkeypatch, KEY_RW)
+        names = {tool.name for tool in await list_tools()}
+
+        assert names == EXPECTED_TOOLS
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_grant_lists_the_narrow_set(self, grant_env, monkeypatch):
+        import bmya_auth
+        from odoo_mcp_server import list_tools
+
+        self.set_headers(monkeypatch, "garbage")
+        names = {tool.name for tool in await list_tools()}
+
+        assert names == EXPECTED_TOOLS - bmya_auth.WRITE_TOOLS
+
+
+class TestHttpClientCache:
+    """The per-credential client cache must stay bounded on a shared server."""
+
+    @pytest.fixture(autouse=True)
+    def clean_cache(self):
+        import odoo_mcp_server
+
+        odoo_mcp_server._http_clients.clear()
+        yield
+        odoo_mcp_server._http_clients.clear()
+
+    def test_same_credentials_reuse_one_client(self):
+        import odoo_mcp_server
+
+        first = odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k")
+        second = odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k")
+        assert first is second
+        assert len(odoo_mcp_server._http_clients) == 1
+
+    def test_different_tenants_never_share_a_client(self):
+        import odoo_mcp_server
+
+        a = odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k1")
+        b = odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k2")
+        assert a is not b
+
+    def test_cache_is_bounded_and_closes_evicted_sessions(self, monkeypatch):
+        import odoo_mcp_server
+
+        monkeypatch.setattr(odoo_mcp_server, "ODOO_CLIENT_CACHE_MAX", 2)
+        first = odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k1")
+        first.session.close = Mock()
+        odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k2")
+        odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k3")
+
+        assert len(odoo_mcp_server._http_clients) == 2
+        first.session.close.assert_called_once()
+
+    def test_recently_used_client_is_not_evicted(self, monkeypatch):
+        import odoo_mcp_server
+
+        monkeypatch.setattr(odoo_mcp_server, "ODOO_CLIENT_CACHE_MAX", 2)
+        first = odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k1")
+        odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k2")
+        # Touching k1 makes k2 the eviction candidate.
+        assert odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k1") is first
+        odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k3")
+
+        assert (
+            odoo_mcp_server._get_or_create_client("https://a.bmya.cloud", "db", "k1")
+            is first
+        )
 
 
 if __name__ == "__main__":

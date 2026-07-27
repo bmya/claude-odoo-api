@@ -216,6 +216,32 @@ environment:
   - ODOO_MCP_READONLY=1
 ```
 
+## Remote HTTP mode (shared, multi-tenant)
+
+Besides the local stdio transport described below, the server can run once and be
+shared over the network (`MCP_TRANSPORT=http`). In that mode it stores **no** Odoo
+credentials and each request carries two:
+
+| Header | Supplies |
+|---|---|
+| `X-Bmya-Api-Key` | A BMYA-issued key, one per database and per mode. Resolves server-side to the Odoo URL, the database, and whether the connection is read-only or read-write. |
+| `X-Odoo-Api-Key` | The user's own personal Odoo API key, so Odoo-side permissions and the audit trail stay per user. |
+
+Because the key — not the client — determines the target instance, a caller cannot
+point the server at an arbitrary host, and a read-only key cannot be widened
+(the optional `X-Odoo-Mode` header can only narrow). Keys are stored as sha256
+only, and revoking one is a file edit that takes effect in seconds without a
+restart.
+
+- **Clients**: [docs/remote-client-config.md](docs/remote-client-config.md)
+- **Key registry operation**: [docs/bmya-api-keys.md](docs/bmya-api-keys.md)
+- **Deployment**: [deploy/README.md](deploy/README.md)
+- **Handing access to a client**: [docs/client-onboarding.md](docs/client-onboarding.md)
+
+The server-level guardrails (`ODOO_MCP_READONLY`, `ODOO_MCP_ALLOWED_METHODS`) act
+as a ceiling over every key: a read-write key does nothing while the server is in
+read-only mode.
+
 ## Installation & Usage
 
 ### Option 1: Docker (Recommended)

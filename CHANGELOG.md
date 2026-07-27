@@ -1,5 +1,86 @@
 # Changelog
 
+## [Unreleased] - 2026-07-26 — Capa de autorización BMYA y empaquetado para bmya.cloud
+
+### Added
+- **Nueva capa de autorización por base de datos** (`src/bmya_auth.py`): cada request
+  en modo HTTP debe traer una **BMYA API key** (`X-Bmya-Api-Key`) además de la API key
+  de Odoo del usuario. La key se valida contra un registro JSON
+  (`BMYA_API_KEYS_FILE`) que guarda **sólo el sha256**, nunca la key en claro.
+- La key resuelve, del lado servidor, un **grant**: URL de Odoo, base de datos, modo
+  (`readonly`/`readwrite`), y opcionalmente `allowed_methods`, `allowed_models` y
+  `denied_models`.
+- **Modo configurable desde el cliente pero sólo para restringir**: el modo efectivo es
+  el más restrictivo de (`ODOO_MCP_READONLY` del servidor, el del grant, el
+  `X-Odoo-Mode` que pida el cliente). Ampliar es estructuralmente imposible.
+- **Revocación sin redeploy**: el registro se relee al cambiar su mtime/tamaño, como
+  máximo cada `BMYA_REGISTRY_TTL_SECONDS` (10 por defecto). `SIGHUP` recarga al
+  instante. Si una recarga falla se conserva la última copia buena y se marca `stale`.
+- **`tools/bmya-keys.py`**: CLI para emitir (`new`), listar (`list`), revocar
+  (`revoke`), comprobar (`verify`, lee por stdin) y validar (`validate`) el registro.
+  Escrituras atómicas con `.bak`; dry-run salvo `--write`.
+- **`GET /readyz`**: readiness real, 503 si el registro de keys no cargó. El healthcheck
+  del contenedor pasó a usarlo, así que un montaje mal hecho rompe el deploy en voz alta
+  en lugar de devolver 401 a todos los clientes en silencio.
+- `list_tools` **oculta las 4 tools de escritura** en conexiones de sólo lectura.
+- Log de auditoría por llamada (`key_id`, base, tool, modo, allow/deny). Nunca la key,
+  su hash, ni la API key de Odoo.
+- Empaquetado: `deploy/.env.example`, `deploy/README.md`, `deploy/bmya-api-keys.example.json`,
+  `requirements-dev.txt`, y `.github/workflows/release.yml` (build multi-arch
+  `linux/amd64,linux/arm64` y push a ghcr en tag). El compose trae `image:` **y**
+  `build:`, para bajar una imagen prearmada o buildear en el servidor.
+- Docs nuevos: `docs/bmya-api-keys.md` (operador) y `docs/client-onboarding.md` (cliente).
+- Tests: 176 en total (antes 31). Nuevos `tests/test_bmya_auth.py` (91),
+  `tests/test_http_auth.py` (24, **primera cobertura de la capa HTTP** con
+  `TestClient`), `TestCallToolWithGrant` y `TestHttpClientCache`, más
+  `tests/conftest.py` con fixtures compartidas.
+
+### Fixed
+- **SSRF**: la URL de Odoo ya no viene del request. Antes, cualquiera que pasara el
+  gateway token podía apuntar el servidor a cualquier host alcanzable (incluido
+  `169.254.169.254` y servicios internos). Ahora la fija el grant, y el loader además
+  rechaza URLs que no sean https, con credenciales, o hacia IPs privadas/link-local.
+- **Fuga de configuración**: `odoo_list_companies` se atendía **antes** de cualquier
+  chequeo de autenticación y enumeraba las secciones del `.env` del servidor a cualquier
+  llamador. Ahora la autorización se resuelve primero y, bajo un grant, la tool sólo
+  informa la instancia de ese grant.
+- `MCP_GATEWAY_TOKEN` se comparaba con `!=`; ahora usa `hmac.compare_digest`.
+- El caché de clientes por credenciales era **ilimitado** (crecía con cada usuario, sin
+  cerrar sockets). Ahora es un LRU acotado (`ODOO_CLIENT_CACHE_MAX`, 256) que cierra la
+  sesión al evictar, y quedó en un namespace separado del de compañías, que antes
+  compartía el mismo dict.
+- El montaje del registro es un **directorio**, no un archivo: un bind mount de archivo
+  fija el inode y, como el CLI reescribe atómicamente, el contenedor seguía leyendo el
+  inode viejo y **la revocación nunca aplicaba** (verificado: con montaje de archivo la
+  key revocada seguía dando 200; con directorio da 401).
+- `tests/test_odoo_mcp_server.py::test_call_tool_without_company` estaba roto desde la
+  rama `vpn` (asserteaba un mensaje que ya no existía). El CI no lo detectó porque sólo
+  corría en `main`/`develop`; ahora corre también en `vpn`.
+- El job de lint ya venía fallando: `flake8 --select=...F82` matchea `F824`, y había tres
+  `global` inútiles en `src/odoo_mcp_server.py`. Eliminados.
+- La aserción `len(tools) == 12` se reemplazó por una comparación del set de nombres, así
+  un rename falla en voz alta en vez de que un contador se desfase en silencio.
+- Se sacaron del código las API keys de Odoo hardcodeadas (`create_odoo_invoices.py`
+  ahora lee de env o de una sección del `.env`) y se redactaron las de los `.md` de
+  estado. **Siguen en el historial de git: hay que revocarlas y reemitirlas en Odoo.**
+
+### ⚠️ BREAKING
+- **Los clientes ya no envían `X-Odoo-Url` ni `X-Odoo-Database`.** Los aporta la BMYA
+  key. Si se envían y no coinciden con el grant, el pedido se **rechaza** (antes se
+  ignoraban en silencio). Hay que actualizar la config de cada cliente:
+  ver `docs/remote-client-config.md`.
+- **`MCP_FORWARDED_ALLOW_IPS` pasó de `*` a `127.0.0.1`.** Con `*`, cualquiera que
+  alcance el puerto puede falsificar `X-Forwarded-For`/`-Proto`. En el despliegue hay que
+  setearlo a la IP del host de Traefik (`TRAEFIK_HOST_IP`).
+- El puerto del compose ya no se publica en todas las interfaces, sino sólo en
+  `MCP_BIND_ADDR` (la IP de la VLAN).
+- El healthcheck del contenedor apunta a `/readyz` en lugar de `/health`.
+- **Rollback disponible**: `BMYA_AUTH_ENABLED=0` restaura el comportamiento anterior de
+  tres headers sin cambiar la imagen. Sirve para desplegar primero y migrar las configs
+  de a una. El camino está cubierto por tests. Conviene mantener el flag una release y
+  después eliminarlo.
+- **stdio no cambia**: no requiere BMYA key y sigue usando el `.env` multi-compañía.
+
 ## [Unreleased] - 2026-07-10 (bis)
 
 ### Added

@@ -1,15 +1,44 @@
 import json
+import os
+import sys
+from configparser import ConfigParser
+
 import requests
 
-api_key = "1b9d57b74136bd3645b971a04e2144fb2e6a2f6d"
+# Credentials come from the environment, or from a section of the .env INI:
+#     ODOO_API_KEY=... ODOO_DATABASE=... ODOO_URL=... python create_odoo_invoices.py
+#     ODOO_COMPANY=bmya python create_odoo_invoices.py
+# Never hardcode a key here: this file is committed.
+COMPANY = os.getenv("ODOO_COMPANY")
+CONFIG_FILE = os.getenv("ODOO_CONFIG_FILE", ".env")
+
+api_key = os.getenv("ODOO_API_KEY")
+database = os.getenv("ODOO_DATABASE")
+base_url = os.getenv("ODOO_URL", "http://localhost:8069").rstrip("/")
+
+if COMPANY and not (api_key and database):
+    config = ConfigParser()
+    config.read(CONFIG_FILE)
+    if not config.has_section(COMPANY):
+        sys.exit(f"Section [{COMPANY}] not found in {CONFIG_FILE}")
+    api_key = api_key or config.get(COMPANY, "ODOO_API_KEY")
+    database = database or config.get(COMPANY, "ODOO_DATABASE")
+    base_url = config.get(COMPANY, "ODOO_URL", fallback=base_url).rstrip("/")
+
+if not api_key or not database:
+    sys.exit(
+        "Missing credentials: set ODOO_API_KEY and ODOO_DATABASE (and optionally "
+        "ODOO_URL), or ODOO_COMPANY to read them from a .env section."
+    )
+
 headers = {
     "Authorization": f"Bearer {api_key}",
-    "X-Odoo-Database": "odoo19e_bmya"
+    "X-Odoo-Database": database,
 }
 
 # Fetch document types
 response = requests.post(
-    "http://localhost:8069/json/2/l10n_latam.document.type/search_read",
+    f"{base_url}/json/2/l10n_latam.document.type/search_read",
     headers=headers,
     json={"domain": [], "fields": ["id", "code"], "limit": 100}
 )
@@ -19,7 +48,7 @@ latam_code_to_id = {d["code"]: d["id"] for d in data}
 
 # Fetch uoms
 response = requests.post(
-    "http://localhost:8069/json/2/uom.uom/search_read",
+    f"{base_url}/json/2/uom.uom/search_read",
     headers=headers,
     json={"domain": [], "fields": ["id", "display_name"], "limit": 100}
 )
@@ -32,7 +61,7 @@ if not default_uom_id:
 
 # Fetch a journal
 response = requests.post(
-    "http://localhost:8069/json/2/account.journal/search_read",
+    f"{base_url}/json/2/account.journal/search_read",
     headers=headers,
     json={
         "domain": [["type", "=", "sale"], ["l10n_latam_use_documents", "=", True]],
@@ -99,7 +128,7 @@ for json_libredte in libre_dte_list:
     }
 
     response = requests.post(
-        "http://localhost:8069/json/2/account.move/create",
+        f"{base_url}/json/2/account.move/create",
         headers=headers,
         json={"vals_list": move_vals}
     )

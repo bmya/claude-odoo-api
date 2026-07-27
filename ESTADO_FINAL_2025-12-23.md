@@ -128,6 +128,11 @@ docker mcp catalog show bmya-mcp-catalog  # Ver catálogo
 
 ### 4. Configuración Multi-Company
 
+> ⚠️ **Las API keys que estaban acá quedaron redactadas, pero siguen en el
+> historial de git.** Hay que **revocarlas y reemitirlas en Odoo** (Preferencias
+> → Seguridad de la cuenta), y si el repo se va a compartir, purgar el historial
+> con `git filter-repo` (reescribe todos los commits y requiere force-push).
+
 **Archivo:** `/Users/danielb/claude-odoo-api/.env`
 
 **Company 1 - bmya (Producción):**
@@ -135,7 +140,7 @@ docker mcp catalog show bmya-mcp-catalog  # Ver catálogo
 [bmya]
 ODOO_URL=https://www.bmya.cl
 ODOO_DATABASE=bmya-bmya-sh-prd-4855003
-ODOO_API_KEY=4af946d14e9455260199bd814152f85e51581c9c
+ODOO_API_KEY=<REDACTED-ROTATE-THIS-KEY>
 COMPANY_ID=1
 ```
 
@@ -144,7 +149,7 @@ COMPANY_ID=1
 [companycl]
 ODOO_URL=http://host.docker.internal:8069
 ODOO_DATABASE=odoo19e_test3
-ODOO_API_KEY=2f133ffb6da1b3afde0681dc346c230e1eb187ad
+ODOO_API_KEY=<REDACTED-ROTATE-THIS-KEY>
 COMPANY_ID=3
 ```
 

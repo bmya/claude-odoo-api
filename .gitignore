@@ -59,3 +59,8 @@ Thumbs.db
 
 # Project specific
 salida.json
+
+# BMYA key registry (real grants) and deployment settings — never committed.
+# Only the .example variants are tracked.
+deploy/config/
+deploy/.env

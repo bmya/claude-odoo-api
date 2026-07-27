@@ -46,6 +46,10 @@ COPY --from=builder --chown=odoo:odoo /root/.local /home/odoo/.local
 # Copy the MCP server source
 COPY --chown=odoo:odoo src/ ./src/
 
+# Key-registry management CLI, so `docker compose exec` can list/verify grants.
+# Minting with --write happens on the host: the registry is mounted read-only.
+COPY --chown=odoo:odoo tools/ ./tools/
+
 # Switch to non-root user
 USER odoo
 
@@ -60,13 +64,16 @@ ENV ODOO_MAX_RETRIES=3
 # HTTP transport port (only used when MCP_TRANSPORT=http)
 EXPOSE 8080
 
-# Health check: hits /health in HTTP mode; a no-op in stdio mode or when the
+# Health check: hits /readyz in HTTP mode; a no-op in stdio mode or when the
 # app terminates TLS directly (deployment terminates TLS at the reverse proxy).
+# /readyz rather than /health on purpose: it returns 503 when the BMYA key
+# registry is missing or unparseable, so a bad mount fails the deploy loudly
+# instead of silently 401-ing every client.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import os,sys,urllib.request; \
 m=os.getenv('MCP_TRANSPORT','stdio'); \
 sys.exit(0) if m!='http' or os.getenv('MCP_TLS_CERTFILE') else \
-urllib.request.urlopen('http://127.0.0.1:'+os.getenv('MCP_HTTP_PORT','8080')+'/health', timeout=5).read()"
+urllib.request.urlopen('http://127.0.0.1:'+os.getenv('MCP_HTTP_PORT','8080')+'/readyz', timeout=5).read()"
 
 # Run the MCP server (transport selected via MCP_TRANSPORT env var)
 CMD ["python", "src/odoo_mcp_server.py"]

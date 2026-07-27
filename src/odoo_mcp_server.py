@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import logging
 import time
+from collections import OrderedDict
 from typing import Any, Optional, Dict
 from configparser import ConfigParser
 import requests
@@ -21,6 +22,8 @@ from urllib3.util.retry import Retry
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 import mcp.server.stdio
+
+import bmya_auth as bmya
 
 # Configure logging with more detail
 logging.basicConfig(
@@ -49,8 +52,11 @@ MCP_HTTP_PATH = os.getenv("MCP_HTTP_PATH", "/mcp")
 # served and TLS is expected to be terminated by a reverse proxy (Traefik).
 MCP_TLS_CERTFILE = os.getenv("MCP_TLS_CERTFILE") or None
 MCP_TLS_KEYFILE = os.getenv("MCP_TLS_KEYFILE") or None
-# Which client IPs are trusted to set X-Forwarded-* (default: trust the proxy).
-MCP_FORWARDED_ALLOW_IPS = os.getenv("MCP_FORWARDED_ALLOW_IPS", "*")
+# Which client IPs are trusted to set X-Forwarded-*. Defaults to loopback only:
+# trusting "*" lets anyone who can reach the port forge X-Forwarded-For and
+# X-Forwarded-Proto. In the bmya.cloud deployment Traefik runs on a separate
+# host, so this must be set to that host's VLAN address.
+MCP_FORWARDED_ALLOW_IPS = os.getenv("MCP_FORWARDED_ALLOW_IPS", "127.0.0.1")
 
 # Optional gateway token: when set, HTTP requests must carry a matching
 # X-Gateway-Token header. A reconfigurable "front door" independent of the
@@ -279,13 +285,19 @@ app = Server("odoo-mcp-server")
 
 # Store multiple company configurations
 company_configs: Dict[str, Dict[str, str]] = {}
+
+# Clients built from the stdio .env sections, keyed by company name.
 odoo_clients: Dict[str, OdooClient] = {}
+
+# Clients built from per-request credentials, keyed by a hash of those
+# credentials. Kept separate from odoo_clients so company names and credential
+# hashes never share a namespace, and so this one can be bounded.
+ODOO_CLIENT_CACHE_MAX = int(os.getenv("ODOO_CLIENT_CACHE_MAX", "256"))
+_http_clients: "OrderedDict[str, OdooClient]" = OrderedDict()
 
 
 def load_company_configs() -> Dict[str, Dict[str, str]]:
     """Load company configurations from .env file"""
-    global company_configs
-
     if company_configs:
         return company_configs
 
@@ -312,8 +324,6 @@ def load_company_configs() -> Dict[str, Dict[str, str]]:
 
 def get_odoo_client(company: str) -> OdooClient:
     """Get or create Odoo client instance for specific company"""
-    global odoo_clients
-
     if company not in odoo_clients:
         configs = load_company_configs()
 
@@ -341,16 +351,31 @@ def list_available_companies() -> list[str]:
 def _get_or_create_client(url: str, database: str, api_key: str) -> OdooClient:
     """Get or create a client keyed by a hash of its credentials.
 
-    Keying on the credential hash (not on a company name) isolates tenants:
-    two users with different Odoo credentials never share a cached client,
-    while connection pooling is preserved for repeated calls with the same
+    Keying on the credential hash (not on a company name) isolates tenants: two
+    users with different Odoo credentials never share a cached client, while
+    connection pooling is preserved for repeated calls with the same
     credentials.
+
+    Bounded LRU: on a shared multi-tenant server the number of distinct
+    credential triples grows with every user, so an unbounded cache leaks memory
+    and sockets. Evicted clients get their session closed.
     """
-    global odoo_clients
     key = hashlib.sha256(f"{url}|{database}|{api_key}".encode()).hexdigest()
-    if key not in odoo_clients:
-        odoo_clients[key] = OdooClient(url, database, api_key)
-    return odoo_clients[key]
+
+    client = _http_clients.get(key)
+    if client is not None:
+        _http_clients.move_to_end(key)
+        return client
+
+    client = OdooClient(url, database, api_key)
+    _http_clients[key] = client
+    while len(_http_clients) > ODOO_CLIENT_CACHE_MAX:
+        _, evicted = _http_clients.popitem(last=False)
+        try:
+            evicted.session.close()
+        except Exception:
+            logger.debug("Could not close an evicted client session", exc_info=True)
+    return client
 
 
 def _request_headers():
@@ -367,15 +392,34 @@ def _request_headers():
     return request.headers if request is not None else None
 
 
-def resolve_odoo_client(arguments: dict) -> OdooClient:
+def resolve_odoo_client(arguments: dict, grant: Optional[bmya.Grant] = None) -> OdooClient:
     """Resolve the Odoo client for a tool call.
 
-    HTTP transport: credentials come from the X-Odoo-* connection headers
-    (per-user, multi-tenant). stdio transport (or missing headers): fall back
-    to the 'company' argument against the server .env.
+    With a BMYA grant the instance is fixed server-side: the URL and database
+    come from the grant and only the user's own Odoo API key comes off the wire.
+    That is what removes the SSRF surface — a caller can no longer name the host
+    the server connects to.
+
+    Without a grant: stdio transport (or the BMYA_AUTH_ENABLED=0 rollback path)
+    falls back to the X-Odoo-* headers or to the 'company' .env section.
     """
     headers = _request_headers()
+
+    if grant is not None:
+        api_key = headers.get(HEADER_KEY) if headers is not None else None
+        if not api_key:
+            raise ValueError(
+                "Missing X-Odoo-Api-Key header: send your own Odoo API key "
+                "(Odoo: Preferences -> Account Security -> New API key)."
+            )
+        return _get_or_create_client(grant.odoo_url, grant.database, api_key)
+
     if headers is not None:
+        if bmya.BMYA_AUTH_ENABLED:
+            # Unreachable by construction: with authorization on, call_tool
+            # always resolves a grant first. Fail closed rather than silently
+            # falling through to the .env, which would be an escalation.
+            raise bmya.AuthError("no_grant")
         url = headers.get(HEADER_URL)
         database = headers.get(HEADER_DB)
         api_key = headers.get(HEADER_KEY)
@@ -393,9 +437,59 @@ def resolve_odoo_client(arguments: dict) -> OdooClient:
     )
 
 
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available Odoo tools"""
+def _reject_mismatched_legacy_headers(headers, grant: bmya.Grant) -> None:
+    """Refuse a request whose legacy url/db headers contradict its grant.
+
+    Silently ignoring them would leave the caller believing they are querying
+    database A while the server reads database B.
+    """
+    sent_url = (headers.get(HEADER_URL) or "").strip().rstrip("/")
+    sent_db = (headers.get(HEADER_DB) or "").strip()
+
+    if sent_url and sent_url != grant.odoo_url:
+        raise bmya.ToolDenied(
+            f"This BMYA API key is bound to {grant.odoo_url}, but the request sent "
+            f"X-Odoo-Url: {sent_url}. Remove the X-Odoo-Url and X-Odoo-Database "
+            "headers: the instance is selected by the key."
+        )
+    if sent_db and sent_db != grant.database:
+        raise bmya.ToolDenied(
+            f"This BMYA API key is bound to database {grant.database}, but the request "
+            f"sent X-Odoo-Database: {sent_db}. Remove the X-Odoo-Url and "
+            "X-Odoo-Database headers: the instance is selected by the key."
+        )
+    if sent_url or sent_db:
+        logger.debug(
+            "Ignoring redundant legacy url/db headers for key_id=%s", grant.key_id
+        )
+
+
+def _describe_connection(headers, grant: Optional[bmya.Grant], mode: Optional[str]) -> str:
+    """Text for odoo_list_companies.
+
+    Under a grant this reports only that grant's own instance. It must never
+    enumerate the server's .env sections, which would leak other tenants' names
+    to any caller.
+    """
+    if grant is not None:
+        return grant.describe(
+            mode=mode,
+            allowed_methods=bmya.effective_allowed_methods(grant, ODOO_ALLOWED_METHODS),
+        )
+
+    if headers is not None and headers.get(HEADER_URL):
+        return (
+            "Current connection instance (from headers):\n"
+            f"  URL: {headers.get(HEADER_URL)}\n"
+            f"  Database: {headers.get(HEADER_DB)}"
+        )
+
+    companies = list_available_companies()
+    return f"Available companies: {', '.join(companies)}\n\nTotal: {len(companies)}"
+
+
+def _all_tools() -> list[Tool]:
+    """Every tool this server implements."""
     return [
         Tool(
             name="odoo_list_companies",
@@ -715,37 +809,81 @@ async def list_tools() -> list[Tool]:
     ]
 
 
+@app.list_tools()
+async def list_tools() -> list[Tool]:
+    """List the tools available on this connection.
+
+    A connection whose effective mode is read-only does not get the write tools
+    listed at all, so a client's model never even attempts one. This is a
+    usability measure, not the control: call_tool enforces the mode regardless.
+    """
+    tools = _all_tools()
+    headers = _request_headers()
+    if headers is None or not bmya.BMYA_AUTH_ENABLED:
+        return tools
+
+    try:
+        grant = bmya.resolve_grant(headers)
+        mode = bmya.effective_mode(
+            grant,
+            server_readonly=READ_ONLY,
+            requested=headers.get(bmya.HEADER_MODE),
+        )
+    except (bmya.AuthError, bmya.RegistryUnavailable, bmya.ToolDenied) as exc:
+        # Advertise the narrower set when we cannot tell; the call itself will
+        # fail anyway, and over-advertising writes would be the worse mistake.
+        logger.warning("Listing read-only tool set, could not resolve grant: %s", exc)
+        mode = bmya.MODE_RO
+
+    if mode == bmya.MODE_RO:
+        return [tool for tool in tools if tool.name not in bmya.WRITE_TOOLS]
+    return tools
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls"""
+    grant = None
+    mode = None
     try:
+        headers = _request_headers()
+
+        # Authorization comes first, before any tool branch: odoo_list_companies
+        # used to be answered ahead of it and leaked the server's .env section
+        # names to unauthenticated callers.
+        if headers is not None and bmya.BMYA_AUTH_ENABLED:
+            grant = bmya.resolve_grant(headers)
+            mode = bmya.effective_mode(
+                grant,
+                server_readonly=READ_ONLY,
+                requested=headers.get(bmya.HEADER_MODE),
+            )
+            _reject_mismatched_legacy_headers(headers, grant)
+
         if name == "odoo_list_companies":
-            headers = _request_headers()
-            if headers is not None and headers.get(HEADER_URL):
-                return [TextContent(
-                    type="text",
-                    text=(
-                        "Current connection instance (from headers):\n"
-                        f"  URL: {headers.get(HEADER_URL)}\n"
-                        f"  Database: {headers.get(HEADER_DB)}"
-                    )
-                )]
-            companies = list_available_companies()
             return [TextContent(
                 type="text",
-                text=f"Available companies: {', '.join(companies)}\n\nTotal: {len(companies)}"
+                text=_describe_connection(headers, grant, mode),
             )]
 
-        # All other tools need a resolved Odoo client: credentials come from the
-        # X-Odoo-* headers (HTTP transport) or from the 'company' .env section.
-        client = resolve_odoo_client(arguments)
-
-        # Read-only kill-switch: block write operations when enabled
-        if READ_ONLY and name in ("odoo_create", "odoo_write", "odoo_unlink", "odoo_call_method"):
+        if grant is not None:
+            bmya.authorize_tool(
+                name,
+                arguments,
+                grant,
+                mode=mode,
+                server_allowed_methods=ODOO_ALLOWED_METHODS,
+            )
+        elif READ_ONLY and name in bmya.WRITE_TOOLS:
+            # Server-level kill-switch for the stdio / auth-disabled paths.
             return [TextContent(
                 type="text",
                 text="Error: Server in read-only mode: write operations are disabled (ODOO_MCP_READONLY)"
             )]
+
+        # Credentials come from the grant (HTTP) or from the 'company' .env section.
+        client = resolve_odoo_client(arguments, grant=grant)
+        bmya.log_audit(grant=grant, tool=name, mode=mode, decision="allowed")
 
         if name == "odoo_search_read":
             result = client.search_read(
@@ -848,7 +986,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             model = arguments["model"]
             method = arguments["method"]
             key = f"{model}.{method}"
-            if key not in ODOO_ALLOWED_METHODS:
+            # With a grant, authorize_tool already checked this against the
+            # grant's list intersected with the server's.
+            if grant is None and key not in ODOO_ALLOWED_METHODS:
                 allowed = ", ".join(sorted(ODOO_ALLOWED_METHODS)) or "(none)"
                 return [TextContent(type="text", text=(
                     f"Error: Method '{key}' is not allowed. To enable it, add it to the "
@@ -866,8 +1006,33 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         else:
             raise ValueError(f"Unknown tool: {name}")
 
+    # Authorization failures are handled before the catch-all so they can never
+    # be mistaken for, or masked by, an Odoo-side business error.
+    except bmya.AuthError as exc:
+        logger.warning(
+            "Tool %s rejected: %s (key_id=%s)", name, exc.reason, exc.key_id or "-"
+        )
+        bmya.log_audit(grant=None, tool=name, mode=None, decision="unauthenticated")
+        return [TextContent(type="text", text=f"Error: {bmya.PUBLIC_AUTH_ERROR}")]
+
+    except bmya.RegistryUnavailable as exc:
+        logger.error("Tool %s rejected, key registry unavailable: %s", name, exc)
+        return [TextContent(type="text", text=(
+            "Error: the BMYA key registry is unavailable on the server; "
+            "contact BMYA support."
+        ))]
+
+    except bmya.ToolDenied as exc:
+        bmya.log_audit(
+            grant=grant, tool=name, mode=mode, decision="denied", detail=str(exc)
+        )
+        return [TextContent(type="text", text=f"Error: {exc}")]
+
     except Exception as e:
-        logger.error(f"Error executing tool {name}: {e}")
+        # The messages _make_request raises (ValueError/TimeoutError/
+        # ConnectionError) are the useful Odoo-side diagnostics, so they are
+        # still surfaced verbatim; exc_info keeps the traceback in the log.
+        logger.error(f"Error executing tool {name}: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 
@@ -881,20 +1046,98 @@ async def run_stdio():
         )
 
 
-def run_http():
-    """Run the MCP server over Streamable HTTP (shareable over the network).
+def _scope_headers(scope) -> Dict[str, str]:
+    """Flatten raw ASGI headers into a case-insensitive-by-construction dict.
 
-    Stateless: each request is independent and credentials arrive per request
-    via the X-Odoo-* headers. Serves plain HTTP by default (TLS terminated by a
-    reverse proxy) or HTTPS directly when MCP_TLS_CERTFILE/KEYFILE are set.
+    ASGI guarantees header names arrive lowercased, and every header constant in
+    this server is lowercase, so a plain dict is enough. Doing it by hand keeps
+    the middleware free of any Starlette import.
+    """
+    return {
+        name.decode("latin-1").lower(): value.decode("latin-1")
+        for name, value in scope.get("headers", [])
+    }
+
+
+class BmyaAuthMiddleware:
+    """Authenticate HTTP requests before the MCP session manager sees them.
+
+    Pure ASGI on purpose. BaseHTTPMiddleware runs the downstream app in a
+    separate anyio task and wraps the response stream, which is a bad fit for a
+    Streamable HTTP/SSE transport, and it would make passing the resolved grant
+    down to the tool handler depend on undocumented SDK internals. So this layer
+    only *authenticates* (fail fast with a 401) and the tool layer independently
+    re-resolves the grant to *authorize*. Re-resolution is a strip, a sha256, a
+    dict lookup and a compare_digest, so the duplication is free and the tool
+    layer stays authoritative even if this middleware were ever bypassed.
+    """
+
+    #: Probed by the container healthcheck and the proxy; never authenticated.
+    EXEMPT_PATHS = ("/health", "/readyz")
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path", "") in self.EXEMPT_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        headers = _scope_headers(scope)
+
+        if MCP_GATEWAY_TOKEN and not bmya.check_gateway_token(
+            headers.get(bmya.HEADER_GATEWAY_TOKEN), MCP_GATEWAY_TOKEN
+        ):
+            logger.warning("Rejected request with a missing or invalid gateway token")
+            await self._reject(send, 401, "unauthorized")
+            return
+
+        if bmya.BMYA_AUTH_ENABLED:
+            try:
+                grant = bmya.resolve_grant(headers)
+            except bmya.AuthError as exc:
+                # The reason is logged; the caller always gets the same body, so
+                # it cannot tell unknown from revoked from expired.
+                logger.warning(
+                    "Rejected request: %s (key_id=%s)", exc.reason, exc.key_id or "-"
+                )
+                await self._reject(send, 401, "unauthorized")
+                return
+            except bmya.RegistryUnavailable as exc:
+                logger.error("Refusing requests, key registry unavailable: %s", exc)
+                await self._reject(send, 503, "service_unavailable")
+                return
+            logger.debug("Authenticated key_id=%s database=%s", grant.key_id, grant.database)
+
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _reject(send, status: int, error: str) -> None:
+        body = json.dumps({"error": error}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def build_http_app():
+    """Build the Starlette app for the HTTP transport.
+
+    Separate from run_http() so the whole HTTP layer can be driven by a
+    Starlette TestClient without binding a socket.
     """
     import contextlib
-    import uvicorn
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
-    from starlette.responses import JSONResponse, Response
+    from starlette.responses import JSONResponse
     from starlette.middleware import Middleware
-    from starlette.middleware.base import BaseHTTPMiddleware
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     session_manager = StreamableHTTPSessionManager(app=app, stateless=True)
@@ -903,41 +1146,94 @@ def run_http():
         await session_manager.handle_request(scope, receive, send)
 
     async def health(_request):
+        """Liveness only: is the process up. Never authenticated."""
         return JSONResponse({"status": "ok"})
+
+    async def readyz(_request):
+        """Readiness: can this server actually authorize anyone.
+
+        The container healthcheck uses this so a missing or unparseable key
+        registry fails the deploy loudly instead of silently 401-ing every
+        client. Deliberately exposes no labels and no key ids.
+        """
+        status = bmya.registry_status()
+        if status["loaded"]:
+            return JSONResponse({"status": "ready", "stale": status["stale"]})
+        return JSONResponse({"status": "unready"}, status_code=503)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         async with session_manager.run():
             yield
 
-    class GatewayTokenMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request, call_next):
-            if request.url.path != "/health" and \
-                    request.headers.get("x-gateway-token") != MCP_GATEWAY_TOKEN:
-                return Response("Unauthorized", status_code=401)
-            return await call_next(request)
-
-    middleware = [Middleware(GatewayTokenMiddleware)] if MCP_GATEWAY_TOKEN else []
-
-    starlette_app = Starlette(
+    return Starlette(
         debug=False,
         routes=[
             Route("/health", health, methods=["GET"]),
+            Route("/readyz", readyz, methods=["GET"]),
             Mount(MCP_HTTP_PATH, app=handle_mcp),
         ],
-        middleware=middleware,
+        # Always installed: each of its two checks is individually conditional,
+        # so there is no "middleware absent, nothing enforced" state.
+        middleware=[Middleware(BmyaAuthMiddleware)],
         lifespan=lifespan,
     )
+
+
+def run_http():
+    """Run the MCP server over Streamable HTTP (shareable over the network).
+
+    Stateless: each request is independent. The Odoo instance comes from the
+    BMYA grant behind the X-Bmya-Api-Key header and the user's own Odoo API key
+    from X-Odoo-Api-Key, so the server stores no Odoo credentials. Serves plain
+    HTTP by default (TLS terminated by a reverse proxy) or HTTPS directly when
+    MCP_TLS_CERTFILE/KEYFILE are set.
+    """
+    import signal
+    import uvicorn
+
+    starlette_app = build_http_app()
 
     ssl_kwargs = {}
     if MCP_TLS_CERTFILE and MCP_TLS_KEYFILE:
         ssl_kwargs = {"ssl_certfile": MCP_TLS_CERTFILE, "ssl_keyfile": MCP_TLS_KEYFILE}
 
+    # SIGHUP drops the cached registry, so a revocation can take effect at once
+    # instead of waiting out BMYA_REGISTRY_TTL_SECONDS.
+    def _reload_registry(_signum, _frame):
+        logger.info("SIGHUP received: invalidating BMYA key registry cache")
+        bmya.invalidate_registry_cache()
+
+    try:
+        signal.signal(signal.SIGHUP, _reload_registry)
+    except (AttributeError, ValueError):
+        logger.debug("SIGHUP handler not available on this platform")
+
     scheme = "https" if ssl_kwargs else "http"
     logger.info(
         f"HTTP transport listening on {scheme}://{MCP_HTTP_HOST}:{MCP_HTTP_PORT}{MCP_HTTP_PATH} "
-        f"(gateway token: {'on' if MCP_GATEWAY_TOKEN else 'off'})"
+        f"(gateway token: {'on' if MCP_GATEWAY_TOKEN else 'off'}, "
+        f"BMYA auth: {'on' if bmya.BMYA_AUTH_ENABLED else 'OFF'}, "
+        f"read-only: {'on' if READ_ONLY else 'off'})"
     )
+    if bmya.BMYA_AUTH_ENABLED:
+        try:
+            registry = bmya.get_registry()
+            logger.info(
+                f"BMYA key registry: {registry.source} "
+                f"({len(registry.grants_by_hash)} grant(s), "
+                f"{len(registry.databases)} database(s))"
+            )
+        except bmya.RegistryUnavailable as exc:
+            # Not fatal: /readyz reports unready and every request gets a 503,
+            # so mounting the registry late is recoverable without a restart.
+            logger.error(f"BMYA key registry unavailable at startup: {exc}")
+    else:
+        logger.warning(
+            "BMYA_AUTH_ENABLED=0: per-database authorization is DISABLED and clients "
+            "supply their own X-Odoo-Url/X-Odoo-Database. Rollback mode only."
+        )
+
     uvicorn.run(
         starlette_app,
         host=MCP_HTTP_HOST,
