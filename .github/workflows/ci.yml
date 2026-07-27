@@ -35,12 +35,6 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt -r requirements-dev.txt
 
-    - name: Validate the example key registry
-      env:
-        BMYA_ALLOWED_URL_SUFFIXES: .bmya.cloud,.bmya.cl
-      run: |
-        python tools/bmya-keys.py validate --file deploy/bmya-api-keys.example.json
-
     - name: Run tests with coverage
       run: |
         pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
@@ -75,7 +69,8 @@ jobs:
       run: |
         black --check --line-length 100 \
           src/bmya_auth.py tools/bmya-keys.py \
-          tests/conftest.py tests/test_bmya_auth.py tests/test_http_auth.py
+          tests/conftest.py tests/test_bmya_auth.py tests/test_http_auth.py \
+          tests/test_bmya_keys_cli.py
 
     - name: Check code formatting with black (legacy, advisory)
       run: |

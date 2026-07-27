@@ -31,35 +31,59 @@ usuario → Seguridad de la cuenta → Nueva API key*. Es personal e intransferi
 
 ## Config del cliente MCP
 
-Una entrada por cada base que uses, todas al mismo servidor, diferenciadas
-únicamente por la BMYA key (Claude Desktop / Claude Code):
+BMYA te va a mandar, junto con tu key, un bloque ya armado con las dos opciones
+de abajo (lo genera `tools/bmya-keys.py new`/`snippet`, ver
+[bmya-api-keys.md](bmya-api-keys.md)) — no hace falta escribirlo a mano. Esta
+sección explica el porqué de cada una.
+
+> **Ojo:** el formato clásico `"type": "http"` + `"headers"` en
+> `mcpServers` **no funciona en la app Claude Desktop** — su
+> `claude_desktop_config.json` sólo acepta entradas `command`/`args` (stdio) y
+> rechaza en silencio cualquier otra cosa ("no son configuraciones válidas de
+> servidores MCP y fueron omitidas"), verificado contra el schema real de la
+> app. Sí funciona con `claude mcp add` en Claude Code, que soporta HTTP y
+> headers de forma nativa.
+
+### Opción A — Claude Code (un solo comando, recomendado)
+
+```bash
+claude mcp add --transport http odoo-clienteX https://odoo-mcp.bmya.cloud/mcp \
+  --header "X-Bmya-Api-Key: bmya_ro_a3f19c_..." \
+  --header "X-Odoo-Api-Key: TU_API_KEY_PERSONAL"
+```
+
+Nada que editar, conecta al instante. Repetir por cada base/modo que uses.
+
+### Opción B — Claude Desktop (la app)
+
+Como esa app no acepta headers directamente, la conexión pasa por
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote), un puente que la app sí
+puede lanzar como proceso normal (`npx`) y que es quien le habla al servidor por
+HTTP llevando los headers. Pegar esto en *Configuración → Developer → Edit
+Config* (o directamente en `claude_desktop_config.json`) y reiniciar la app por
+completo:
 
 ```json
 {
   "mcpServers": {
     "odoo-clienteX": {
-      "type": "http",
-      "url": "https://odoo-mcp.bmya.cloud/mcp",
-      "headers": {
-        "X-Bmya-Api-Key": "bmya_ro_a3f19c_...",
-        "X-Odoo-Api-Key": "TU_API_KEY_PERSONAL"
-      }
-    },
-    "odoo-clienteX-escritura": {
-      "type": "http",
-      "url": "https://odoo-mcp.bmya.cloud/mcp",
-      "headers": {
-        "X-Bmya-Api-Key": "bmya_rw_b7e204_...",
-        "X-Odoo-Api-Key": "TU_API_KEY_PERSONAL"
-      }
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote", "https://odoo-mcp.bmya.cloud/mcp", "--transport", "http-only",
+        "--header", "X-Bmya-Api-Key: bmya_ro_a3f19c_...",
+        "--header", "X-Odoo-Api-Key: TU_API_KEY_PERSONAL"
+      ]
     }
   }
 }
 ```
 
+La primera vez que arranca descarga `mcp-remote` vía `npx` (unos segundos);
+después queda en caché. Requiere Node.js instalado.
+
 Con una key de sólo lectura el servidor **ni siquiera lista** las herramientas de
 escritura (`odoo_create`, `odoo_write`, `odoo_unlink`, `odoo_call_method`), así
-que el modelo no las intenta.
+que el modelo no las intenta, en cualquiera de las dos opciones.
 
 Para ver contra qué instancia quedaste conectado, pedile al asistente que llame
 `odoo_list_companies`: devuelve la URL, la base, el modo efectivo y los métodos

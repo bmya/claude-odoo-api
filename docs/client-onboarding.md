@@ -6,7 +6,8 @@ compatible) leer y —si corresponde— escribir en tu Odoo.
 ## Qué recibís de BMYA
 
 1. Una **BMYA API key**, que ya viene atada a tu instancia y tu base de datos.
-2. Un bloque JSON listo para pegar en la configuración de tu cliente.
+2. Un mensaje con dos bloques listos para copiar, uno para cada cliente de IA
+   posible (más abajo explicamos cuál usar).
 
 Vas a recibir una key de **lectura** (`bmya_ro_…`) y, si tu caso lo requiere, una
 separada de **escritura** (`bmya_rw_…`).
@@ -20,22 +21,39 @@ separada de **escritura** (`bmya_rw_…`).
 Esto es importante: el asistente entra a Odoo **como vos**, con tus permisos y
 quedando registrado a tu nombre. BMYA no tiene tu clave.
 
-**2. Pegar la configuración** que te enviamos, completando tu API key de Odoo:
+**2. Usar el bloque que corresponde a tu cliente de IA.**
+
+Si usás **Claude Code** (terminal), copiá y pegá este único comando,
+reemplazando `TU_API_KEY_DE_ODOO` por la que generaste en el paso 1:
+
+```bash
+claude mcp add --transport http odoo https://odoo-mcp.bmya.cloud/mcp \
+  --header "X-Bmya-Api-Key: la-key-que-te-dio-bmya" \
+  --header "X-Odoo-Api-Key: TU_API_KEY_DE_ODOO"
+```
+
+Si usás la **app Claude Desktop**, pegá este bloque en
+*Configuración → Developer → Edit Config* (reemplazando también
+`TU_API_KEY_DE_ODOO`) y reiniciá la app por completo:
 
 ```json
 {
   "mcpServers": {
     "odoo": {
-      "type": "http",
-      "url": "https://odoo-mcp.bmya.cloud/mcp",
-      "headers": {
-        "X-Bmya-Api-Key": "la-key-que-te-dio-bmya",
-        "X-Odoo-Api-Key": "la-api-key-que-generaste-en-odoo"
-      }
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote", "https://odoo-mcp.bmya.cloud/mcp", "--transport", "http-only",
+        "--header", "X-Bmya-Api-Key: la-key-que-te-dio-bmya",
+        "--header", "X-Odoo-Api-Key: TU_API_KEY_DE_ODOO"
+      ]
     }
   }
 }
 ```
+
+(Ese bloque usa `mcp-remote`, un puente estándar que Claude Desktop necesita para
+hablar con servidores remotos como este. Necesita tener Node.js instalado; la
+primera vez tarda unos segundos en descargarlo.)
 
 **3. Verificar.** Pedile al asistente: *"listá las compañías de Odoo"*. Debería
 responder con la URL y la base de datos de tu instancia, y el modo (lectura o
@@ -55,8 +73,9 @@ escritura). Si dice eso, está funcionando.
 ## Preguntas frecuentes
 
 **¿Puedo restringirme a sólo lectura aunque tenga una key de escritura?**
-Sí. Agregá `"X-Odoo-Mode": "readonly"` a los headers. Al revés no funciona: una
-key de lectura no se puede ampliar.
+Sí: agregá un header más, `X-Odoo-Mode: readonly` (un `--header` extra en Claude
+Code, o un par más en `args` en Claude Desktop). Al revés no funciona: una key de
+lectura no se puede ampliar.
 
 **¿Cómo se revoca el acceso?**
 Avisale a BMYA y la key deja de funcionar en segundos, sin que tengas que hacer

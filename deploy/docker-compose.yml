@@ -1,70 +1,25 @@
-# HTTP (Streamable HTTP) stack. Run from THIS directory:
-#     cd deploy && cp .env.example .env   # edit it, then:
-#     cd deploy && docker compose up -d --build      # build on this server
-#     cd deploy && docker compose pull && docker compose up -d   # prebuilt image
-#
-# It lives in a subdirectory on purpose: Docker Compose auto-loads a file named
-# ".env" from the working directory for its own variable interpolation. The repo
-# root ".env" is the stdio credential INI (mounted by the Claude app), and its
-# values are not Compose syntax — running Compose from the root makes it parse
-# that secret file and emit spurious "variable is not set" warnings. Keeping the
-# HTTP compose here (with its own deploy/.env) avoids reading the secret.
-#
-# Odoo credentials are NOT stored here. Each user sends a BMYA API key
-# (X-Bmya-Api-Key), which resolves server-side to the Odoo URL + database, plus
-# their own personal Odoo API key (X-Odoo-Api-Key). See ../docs/bmya-api-keys.md.
-#
-# Traefik runs on a SEPARATE host and reaches this service over the VLAN, so
-# there are no Docker labels and no shared Docker network here — just a port
-# published on the VLAN address. The proxy-side configuration is documented in
-# ./README.md.
 services:
   odoo-api:
-    # Both keys on purpose: `pull` uses the prebuilt image, `up --build` builds
-    # from source on the server. Either path works with this one file.
     image: ${MCP_IMAGE:-ghcr.io/bmya/odoo-mcp-server:latest}
     build:
       context: ..
       dockerfile: Dockerfile
     container_name: odoo-mcp-server
     ports:
-      # Published ONLY on the VLAN address Traefik comes from. Binding to all
-      # interfaces would expose the backend directly, bypassing the proxy's TLS
-      # and rate limiting.
       - "${MCP_BIND_ADDR:-10.0.0.14}:${MCP_HTTP_PORT:-8080}:8080"
     volumes:
-      # The DIRECTORY holding the BMYA key registry, not the file itself.
-      #
-      # This matters: a single-file bind mount pins the file's inode, so when the
-      # registry is rewritten atomically (tempfile + rename, which is how
-      # tools/bmya-keys.py writes it) the container keeps reading the old,
-      # now-unlinked inode forever and a revocation NEVER takes effect. Mounting
-      # the directory makes the container resolve the name on each open.
-      #
-      # Read-only: keys are minted on the host, never from inside the container.
       - "${BMYA_KEYS_HOST_DIR:-./config}:/app/config:ro"
     environment:
       MCP_TRANSPORT: http
-      # Inside the container it must listen on all interfaces; the host-side
-      # binding above is what limits exposure.
       MCP_HTTP_HOST: 0.0.0.0
       MCP_HTTP_PORT: "8080"
-
-      # Per-database authorization.
       BMYA_AUTH_ENABLED: "${BMYA_AUTH_ENABLED:-1}"
       BMYA_API_KEYS_FILE: /app/config/bmya-api-keys.json
       BMYA_REGISTRY_TTL_SECONDS: "${BMYA_REGISTRY_TTL_SECONDS:-10}"
-      # Refuse to load any grant whose Odoo URL is outside our own domains.
-      BMYA_ALLOWED_URL_SUFFIXES: "${BMYA_ALLOWED_URL_SUFFIXES:-.bmya.cloud,.bmya.cl}"
-
-      # Only the Traefik host may set X-Forwarded-*.
+      BMYA_ALLOWED_URL_SUFFIXES: "${BMYA_ALLOWED_URL_SUFFIXES-.bmya.cloud,.bmya.cl}"
+      BMYA_ALLOW_INSECURE_URLS: "${BMYA_ALLOW_INSECURE_URLS:-}"
       MCP_FORWARDED_ALLOW_IPS: "${TRAEFIK_HOST_IP:-127.0.0.1}"
-
-      # Optional extra "front door" on top of the per-database keys.
       MCP_GATEWAY_TOKEN: "${MCP_GATEWAY_TOKEN:-}"
-
-      # Server-level guardrails: a ceiling over every grant. Starts read-only;
-      # a readwrite key only takes effect once this is turned off.
       ODOO_MCP_READONLY: "${ODOO_MCP_READONLY:-1}"
       ODOO_MCP_ALLOWED_METHODS: "${ODOO_MCP_ALLOWED_METHODS:-}"
       ODOO_REQUEST_TIMEOUT: "30"
@@ -82,20 +37,3 @@ services:
         max-size: "10m"
         max-file: "5"
     restart: unless-stopped
-
-  # Legacy stdio transport (one process per user). Normally launched by the Claude
-  # app via `docker run -i`, not by this compose. Enable here with:
-  #     cd deploy && docker compose --profile stdio up odoo-api-stdio
-  odoo-api-stdio:
-    profiles: ["stdio"]
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    container_name: odoo-mcp-server-stdio
-    volumes:
-      - ../.env:/app/.env:ro
-    environment:
-      MCP_TRANSPORT: stdio
-      ODOO_CONFIG_FILE: /app/.env
-    stdin_open: true
-    tty: true

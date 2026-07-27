@@ -28,12 +28,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Validate the example key registry
-      env:
-        BMYA_ALLOWED_URL_SUFFIXES: .bmya.cloud,.bmya.cl
-      run: |
-        python tools/bmya-keys.py validate --file deploy/bmya-api-keys.example.json
-
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
 

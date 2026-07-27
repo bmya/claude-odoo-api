@@ -261,7 +261,7 @@ Traefik runs on a **separate host** and reaches this server over the VLAN (virtu
 
 The registry is mounted as a **directory** (`./config:/app/config:ro`), never as a single file: a single-file bind mount pins the inode, and since `tools/bmya-keys.py` rewrites atomically (tempfile + rename), the container would keep reading the old unlinked inode and **revocation would never take effect**. This was verified in a container: with a file mount a revoked key kept returning 200; with a directory mount it returns 401.
 
-`tools/bmya-keys.py` mints (`new`), inspects (`list`, `verify`), revokes (`revoke`) and validates (`validate`) the registry. Mutating commands are dry-run unless `--write`. `verify` reads the key from stdin, never argv, to keep it out of shell history. `validate` is a CI step and a pre-deploy gate.
+`tools/bmya-keys.py` mints (`new`), inspects (`list`, `verify`), revokes (`revoke`), regenerates client onboarding text (`snippet`) and validates (`validate`) the registry. Mutating commands are dry-run unless `--write`. `verify` reads the key from stdin, never argv, to keep it out of shell history. There is no example registry checked into the repo — a real registry never belongs in git, and a duplicate example next to `deploy/config/bmya-api-keys.json` (the one actually mounted) was confusing about which path is which — so `validate` is exercised by `tests/test_bmya_keys_cli.py`'s unit tests, and run as a manual pre-deploy gate against the real `deploy/config/bmya-api-keys.json` before restarting the container.
 
 ## Development Commands
 

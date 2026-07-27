@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased] - 2026-07-27 — Onboarding de clientes de bajo esfuerzo
+
+### Removed
+- `deploy/bmya-api-keys.example.json`: convivía con `deploy/config/bmya-api-keys.json`
+  (el registro real, gitignoreado, montado por el compose) y generaba confusión sobre
+  cuál de los dos es el que hay que editar. El paso de CI/release que lo validaba
+  se saca también; lo reemplaza cobertura directa de `cmd_validate` en
+  `tests/test_bmya_keys_cli.py` (caso válido, grant inválido, archivo ausente).
+
+### Added
+- `tools/bmya-keys.py new --server-url` y el nuevo subcomando `snippet` generan,
+  junto con la key, el mensaje completo y listo para enviar al cliente: el comando
+  de una línea para Claude Code (`claude mcp add --transport http ...`) y el
+  bloque JSON para Claude Desktop, con `TU_API_KEY_DE_ODOO` como placeholder para
+  que el cliente ponga la suya. `snippet` regenera ese mismo mensaje a partir de
+  una key ya emitida (por stdin) y se niega a hacerlo si está revocada o vencida.
+  Configurable con `--server-url` o `$BMYA_MCP_SERVER_URL`.
+
+### Fixed
+- **`docs/remote-client-config.md` y `docs/client-onboarding.md` documentaban un
+  formato que Claude Desktop rechaza en silencio**: `"type": "http"` + `"headers"`
+  directo en `mcpServers`. Verificado contra el schema real de esa app
+  (extraído de su `app.asar`): `claude_desktop_config.json` sólo acepta entradas
+  `command`/`args`/`env` (stdio) y omite cualquier otra sin más aviso que un
+  diálogo genérico ("no son configuraciones válidas... y fueron omitidas"). Los
+  docs ahora muestran las dos rutas reales: `claude mcp add` de Claude Code
+  (headers HTTP nativos, verificado con `✔ Connected`) y, para Claude Desktop, el
+  mismo JSON pero envuelto en el puente stdio `mcp-remote` (verificado con un
+  handshake `initialize` completo).
+
 ## [Unreleased] - 2026-07-26 — Capa de autorización BMYA y empaquetado para bmya.cloud
 
 ### Added
@@ -36,6 +66,12 @@
   `tests/conftest.py` con fixtures compartidas.
 
 ### Fixed
+- Documentado en `docs/bmya-api-keys.md` el diagnóstico de
+  `404 "No database is selected"`: el nombre de base de Odoo.sh lleva un sufijo de build
+  que **cambia en cada rebuild**, y con un nombre viejo fallan todas las llamadas aunque
+  la key y el grant estén bien. El `.env` de este repo tenía justamente un nombre de
+  staging desactualizado. Incluye el curl para aislarlo sin pasar por el MCP, más los
+  casos de `403` y de respuesta HTML.
 - **SSRF**: la URL de Odoo ya no viene del request. Antes, cualquiera que pasara el
   gateway token podía apuntar el servidor a cualquier host alcanzable (incluido
   `169.254.169.254` y servicios internos). Ahora la fija el grant, y el loader además

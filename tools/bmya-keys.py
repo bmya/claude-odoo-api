@@ -8,15 +8,24 @@ lost, revoke it and mint a new one.
 
 Usage:
     bmya-keys.py new --database clientex_prod --url https://clientex.bmya.cloud \
-                     --mode readonly --label "ClienteX lectura" --write
+                     --mode readonly --label "ClienteX lectura" --write \
+                     --server-url https://odoo-mcp.bmya.cloud/mcp
     bmya-keys.py list
     bmya-keys.py revoke a3f19c --write
     bmya-keys.py verify --stdin
+    bmya-keys.py snippet --stdin --server-url https://odoo-mcp.bmya.cloud/mcp
     bmya-keys.py validate
 
 Every subcommand reads the registry from --file, falling back to
 $BMYA_API_KEYS_FILE and then to ./bmya-api-keys.json. Mutating subcommands print
 the result and change nothing unless --write is given.
+
+--server-url (or $BMYA_MCP_SERVER_URL) makes `new` and `snippet` also print a
+ready-to-send block with both onboarding paths: a one-line `claude mcp add` for
+Claude Code, and an mcp-remote-wrapped JSON block for Claude Desktop. Desktop's
+claude_desktop_config.json only accepts stdio entries (command/args/env) --
+verified against that app's own schema -- it has no native "http + headers"
+support, so its snippet always goes through the mcp-remote bridge.
 
 Exit codes: 0 ok, 1 validation/runtime error, 2 usage error.
 """
@@ -24,6 +33,7 @@ Exit codes: 0 ok, 1 validation/runtime error, 2 usage error.
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -38,6 +48,7 @@ EXIT_ERROR = 1
 EXIT_USAGE = 2
 
 DEFAULT_FILE = os.getenv("BMYA_API_KEYS_FILE") or "bmya-api-keys.json"
+DEFAULT_SERVER_URL = os.getenv("BMYA_MCP_SERVER_URL") or ""
 
 
 def _now_iso() -> str:
@@ -112,6 +123,67 @@ def _parse_expiry(value):
     return parsed.isoformat()
 
 
+def _slugify(text, fallback: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return text or fallback
+
+
+def render_client_snippets(*, name: str, server_url: str, bmya_key: str) -> str:
+    """A ready-to-send block covering both onboarding paths for one key.
+
+    Claude Code supports HTTP + custom headers natively (`claude mcp add
+    --transport http ... --header ...`, verified end to end: connects with no
+    JSON editing and no restart). Claude Desktop's claude_desktop_config.json
+    does not: its schema only accepts stdio entries (command/args/env), so its
+    path goes through the mcp-remote stdio bridge instead. Both are shown
+    because we cannot tell which client a given recipient uses.
+    """
+    code_cmd = (
+        f"claude mcp add --transport http {name} {server_url} \\\n"
+        f'  --header "X-Bmya-Api-Key: {bmya_key}" \\\n'
+        '  --header "X-Odoo-Api-Key: TU_API_KEY_DE_ODOO"'
+    )
+    desktop_json = json.dumps(
+        {
+            "mcpServers": {
+                name: {
+                    "command": "npx",
+                    "args": [
+                        "-y",
+                        "mcp-remote",
+                        server_url,
+                        "--transport",
+                        "http-only",
+                        "--header",
+                        f"X-Bmya-Api-Key: {bmya_key}",
+                        "--header",
+                        "X-Odoo-Api-Key: TU_API_KEY_DE_ODOO",
+                    ],
+                }
+            }
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+    bar = "=" * 72
+    return (
+        f"{bar}\n"
+        f"Acceso MCP a Odoo -- {name}\n"
+        f"{bar}\n\n"
+        "Antes de usar cualquiera de las dos opciones: genera tu propia API key\n"
+        "en Odoo (Preferencias de usuario -> Seguridad de la cuenta -> Nueva API\n"
+        "key) y reemplaza TU_API_KEY_DE_ODOO por esa key.\n\n"
+        "Opcion A -- Claude Code (un solo comando, sin editar nada):\n\n"
+        f"{code_cmd}\n\n"
+        "Opcion B -- Claude Desktop (la app): pega este bloque dentro de\n"
+        "claude_desktop_config.json (Configuracion -> Developer -> Edit Config)\n"
+        "y reinicia la app por completo para que lo tome:\n\n"
+        f"{desktop_json}\n\n"
+        'Para verificar: pedile al asistente "listá las compañías de Odoo".\n'
+        f"{bar}"
+    )
+
+
 # --- Subcommands
 
 
@@ -174,6 +246,18 @@ def cmd_new(args) -> int:
             print()
             print("Registry entry (add it to the registry, or re-run with --write):")
             print(json.dumps(entry, indent=2, ensure_ascii=False))
+
+        server_url = args.server_url or DEFAULT_SERVER_URL
+        if server_url:
+            slug = _slugify(args.client_name or args.label, f"odoo-{args.database}-{args.mode}")
+            print()
+            print(render_client_snippets(name=slug, server_url=server_url, bmya_key=plaintext))
+        else:
+            print(
+                "\n(pass --server-url, or set BMYA_MCP_SERVER_URL, to also print "
+                "ready-to-send client snippets)",
+                file=sys.stderr,
+            )
 
     print(
         "warning: store the key now; only its sha256 is kept on the server",
@@ -303,6 +387,50 @@ def cmd_verify(args) -> int:
     return EXIT_OK
 
 
+def cmd_snippet(args) -> int:
+    """Regenerate the client onboarding block for an already-minted key.
+
+    Reads the plaintext key from stdin (never argv, same as `verify`) and looks
+    it up so the command can't accidentally print snippets for a revoked or
+    expired key by mistake.
+    """
+    if not args.stdin:
+        print("error: pass --stdin and pipe the key in", file=sys.stderr)
+        return EXIT_USAGE
+
+    plaintext = sys.stdin.read().strip()
+    if not plaintext:
+        print("error: no key on stdin", file=sys.stderr)
+        return EXIT_USAGE
+
+    server_url = args.server_url or DEFAULT_SERVER_URL
+    if not server_url:
+        print("error: pass --server-url or set BMYA_MCP_SERVER_URL", file=sys.stderr)
+        return EXIT_USAGE
+
+    path = _resolve_path(args)
+    try:
+        registry = bmya_auth.load_registry(path)
+    except bmya_auth.RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    grant = registry.grants_by_hash.get(bmya_auth.hash_key(plaintext))
+    if grant is None:
+        print("NOT FOUND: this key is not in the registry", file=sys.stderr)
+        return EXIT_ERROR
+    if grant.revoked:
+        print(f"error: key_id {grant.key_id} is revoked; mint a new one instead", file=sys.stderr)
+        return EXIT_ERROR
+    if grant.is_expired():
+        print(f"error: key_id {grant.key_id} is expired; mint a new one instead", file=sys.stderr)
+        return EXIT_ERROR
+
+    slug = _slugify(args.name or grant.label, f"odoo-{grant.database}-{grant.mode}")
+    print(render_client_snippets(name=slug, server_url=server_url, bmya_key=plaintext))
+    return EXIT_OK
+
+
 def cmd_validate(args) -> int:
     path = _resolve_path(args)
     try:
@@ -356,6 +484,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--allow-models", help="comma-separated model allowlist")
     p_new.add_argument("--deny-models", help="comma-separated model denylist")
     p_new.add_argument("--notes", help="free-form note, e.g. a contact address")
+    p_new.add_argument(
+        "--client-name",
+        help="short name for the MCP server entry in client snippets "
+        "(default: slugified --label, else 'odoo-<database>-<mode>')",
+    )
+    p_new.add_argument(
+        "--server-url",
+        help="public MCP endpoint (e.g. https://odoo-mcp.bmya.cloud/mcp); if set "
+        "(or $BMYA_MCP_SERVER_URL is), also prints ready-to-send client snippets",
+    )
     p_new.add_argument("--write", action="store_true", help="append it to the registry")
     p_new.add_argument("--json", action="store_true", help="machine-readable output")
     p_new.set_defaults(func=cmd_new)
@@ -382,6 +520,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(p_verify)
     p_verify.add_argument("--stdin", action="store_true", help="read the key from stdin")
     p_verify.set_defaults(func=cmd_verify)
+
+    p_snippet = sub.add_parser(
+        "snippet", help="regenerate the client onboarding block for an already-minted key"
+    )
+    add_common(p_snippet)
+    p_snippet.add_argument("--stdin", action="store_true", help="read the key from stdin")
+    p_snippet.add_argument(
+        "--server-url",
+        help="public MCP endpoint; falls back to $BMYA_MCP_SERVER_URL",
+    )
+    p_snippet.add_argument("--name", help="override the MCP server name used in the snippets")
+    p_snippet.set_defaults(func=cmd_snippet)
 
     p_validate = sub.add_parser("validate", help="parse the registry, non-zero on error")
     add_common(p_validate)

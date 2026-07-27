@@ -90,16 +90,57 @@ del CLI falla si se descartó alguno, así que usalo como gate antes de desplega
 
 ## Operación
 
+`tools/bmya-keys.py` usa **sólo la biblioteca estándar**: corre con cualquier
+`python3` ≥ 3.9, sin virtualenv y sin instalar dependencias. También se puede
+ejecutar dentro del contenedor (`docker compose exec`), aunque `--write` falla ahí
+porque el registro está montado `:ro`: la emisión se hace en el host.
+
 Emitir (la key en claro se imprime **una sola vez**):
 
 ```bash
 python tools/bmya-keys.py new --file deploy/config/bmya-api-keys.json --write \
   --database clientex_prod --url https://clientex.bmya.cloud \
-  --mode readonly --label "ClienteX lectura" --expires 2027-01-31
+  --mode readonly --label "ClienteX lectura" --expires 2027-01-31 \
+  --server-url https://odoo-mcp.bmya.cloud/mcp
 ```
+
+> ⚠️ **El nombre de la base tiene que ser el exacto y actual.** En Odoo.sh el
+> nombre incluye un sufijo numérico de build (`bmya-bmya-sh-sta-35226662`) que
+> **cambia cada vez que se reconstruye la instancia**, típicamente en staging. Con
+> un nombre viejo, todas las llamadas fallan con
+> `404 "No database is selected"` — no es un problema de credenciales ni del grant.
+> Ver "Diagnóstico" más abajo.
 
 Sin `--write` imprime la key y la entrada, y no toca el archivo (útil para
 revisar antes de aplicar).
+
+### Mensaje listo para el cliente
+
+Pasando `--server-url` (o seteando `BMYA_MCP_SERVER_URL` para no repetirlo en
+cada emisión), `new` imprime además el mensaje completo para mandarle al
+cliente: el comando de una línea para Claude Code y el bloque JSON para Claude
+Desktop, los dos con la key ya insertada y un placeholder `TU_API_KEY_DE_ODOO`
+para que el cliente ponga la suya. No hay que armar nada a mano — copiar ese
+bloque tal cual a un email o mensaje.
+
+Si ya emitiste la key y necesitás volver a generar ese mismo mensaje (se
+perdió, hay que reenviarlo), usá `snippet` con la key en claro por stdin:
+
+```bash
+echo "$KEY" | python tools/bmya-keys.py snippet --stdin \
+  --file deploy/config/bmya-api-keys.json --server-url https://odoo-mcp.bmya.cloud/mcp
+```
+
+`snippet` resuelve la key contra el registro y se niega a generar el bloque si
+está revocada o vencida — en ese caso hay que emitir una nueva, no reenviar una
+que ya no sirve.
+
+> Por qué el bloque de Claude Desktop usa un puente (`mcp-remote`) en vez del
+> `"type": "http"` + `"headers"` directo: verificamos contra el schema real de
+> esa app que su `claude_desktop_config.json` sólo acepta entradas stdio
+> (`command`/`args`/`env`) y rechaza en silencio cualquier otro formato. Claude
+> Code sí soporta HTTP con headers de forma nativa, por eso su bloque es un
+> solo comando sin intermediarios.
 
 Listar (nunca muestra secretos ni hashes):
 
@@ -127,6 +168,29 @@ python tools/bmya-keys.py validate --file deploy/config/bmya-api-keys.json
 ```
 
 Las escrituras son atómicas (tempfile + rename, modo `600`) y dejan un `.bak`.
+
+## Diagnóstico
+
+**`404 "No database is selected"`** en cada llamada, aunque la key valide y el
+grant se vea bien: el `database` del grant no existe en esa instancia. Casi
+siempre es un nombre de Odoo.sh desactualizado tras un rebuild. Se confirma
+pegándole a Odoo directo, sin pasar por el MCP:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$ODOO_URL/json/2/res.partner/search_count" \
+  -H "Authorization: Bearer $ODOO_API_KEY" -H "X-Odoo-Database: $DB" \
+  -H 'Content-Type: application/json' -d '{"domain":[]}'
+```
+
+Si eso da 404 y **sin** el header `X-Odoo-Database` da 200, el nombre está mal: el
+mismo comando con el nombre correcto devuelve 200. Corregir el `database` del
+grant (el nombre real se ve en el panel de Odoo.sh, o en *Ajustes → Acerca de*).
+
+**`403`**: la API key de Odoo del usuario es inválida, fue revocada, o la API
+externa no está habilitada en esa instancia (requiere plan Custom).
+
+**HTML en lugar de JSON**: el endpoint `/json/2/` no está respondiendo como API;
+suele ser una redirección a la pantalla de login.
 
 ## Cuánto tarda en aplicar un cambio
 

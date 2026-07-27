@@ -1246,20 +1246,23 @@ def run_http():
 
 def main():
     """Run the MCP server using the configured transport (stdio or http)."""
-    logger.info("Starting Odoo MCP Server (Multi-Company Support)")
+    logger.info("Starting Odoo MCP Server")
     logger.info(f"Transport: {MCP_TRANSPORT}")
+
+    if MCP_TRANSPORT == "http":
+        # The .env INI is a stdio-only concept: in HTTP mode the instance comes
+        # from the BMYA grant, so probing for the file here only produced a
+        # WARNING on every boot of a correctly configured server.
+        run_http()
+        return
 
     try:
         companies = list_available_companies()
         logger.info(f"Loaded {len(companies)} companies: {', '.join(companies)}")
     except Exception as e:
-        logger.warning(f"Could not load company configurations on startup: {e}")
-        logger.warning("In HTTP mode this is expected: credentials come from request headers")
+        logger.warning(f"Could not load company configurations: {e}")
 
-    if MCP_TRANSPORT == "http":
-        run_http()
-    else:
-        asyncio.run(run_stdio())
+    asyncio.run(run_stdio())
 
 
 if __name__ == "__main__":
