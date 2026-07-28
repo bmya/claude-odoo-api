@@ -38,12 +38,17 @@ Search and read records from an Odoo model.
 - `order` (optional): Sorting order (e.g., `"name asc"`)
 
 ### 3. `odoo_create`
-Create a new record in an Odoo model.
+Create one or several records in an Odoo model.
 
 **Parameters:**
 - `company` (required): The company configuration name
 - `model` (required): The Odoo model name
-- `values` (required): Dictionary of field values
+- `values`: Dictionary of field values, for a single record
+- `values_list`: List of dicts, for mass creation
+
+Pass exactly one of `values` or `values_list`. They are deliberately two
+single-typed properties rather than one property accepting either shape — see
+the note in `list_tools()`.
 
 ### 4. `odoo_write`
 Update existing records.

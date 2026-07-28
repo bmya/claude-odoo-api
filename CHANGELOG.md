@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased] - 2026-07-28 (bis) — `odoo_create` rechazaba todo `values` válido
+
+### Fixed
+- **`odoo_create` era inusable desde cualquier cliente: cualquier `values`
+  bien formado volvía como error de validación.** Toda llamada respondía
+  `Input validation error: '{"partner_id": 13528}' is not of type 'object',
+  'array'` — con el dict ya convertido a **string**, comillas incluidas.
+  La causa es el **tipo unión** que el schema declaraba para `values`:
+  `{"type": ["object", "array"], "items": {"type": "object"}}`. Los clientes
+  serializan a JSON string una propiedad de tipo unión antes de mandarla, y
+  entonces el propio servidor la rechaza contra su propio schema. La tool
+  hermana `odoo_write` nunca falló, y su `values` es un `{"type": "object"}`
+  pelado: esa diferencia era todo el bug.
+  Verificado A/B contra el despliegue (v1.28.1): con `values` como dict real
+  la validación pasa y el request llega a Odoo; con `values` como string
+  reproduce el error reportado textualmente.
+  Ahora son **dos propiedades de tipo simple**: `values` (dict, un registro) y
+  `values_list` (lista de dicts, creación masiva). El handler exige
+  exactamente una de las dos. `required` pasa de `["model", "values"]` a
+  `["model"]`.
+- `tests/test_odoo_mcp_server.py::TestCreateValuesSchema` deja clavado el
+  invariante: **ninguna** propiedad de **ninguna** tool puede declarar un
+  `"type"` que sea una lista. Que no vuelva por otra tool.
+
+### Nota
+- No confundir con [PR #1](https://github.com/bmya/claude-odoo-api/pull/1)
+  (`values` → `vals_list`/`vals` en el payload hacia Odoo 19). Ese arreglo ya
+  está incorporado desde `4bc461b`/`27e5c04` y es la capa del **wire**; este
+  bug era la capa del **schema MCP**, aguas arriba, y no dejaba ni llegar a
+  Odoo.
+
 ## [Unreleased] - 2026-07-28 — La reescritura del registro preserva el owner
 
 ### Fixed

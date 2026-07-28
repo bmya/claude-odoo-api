@@ -553,13 +553,26 @@ def _all_tools() -> list[Tool]:
                         "type": "string",
                         "description": "The Odoo model name (e.g., 'res.partner', 'account.move')"
                     },
+                    # NOTE: keep these two as separate single-type properties.
+                    # A union type ("type": ["object", "array"]) is what the
+                    # schema used to declare, and clients silently serialize
+                    # such a property to a JSON *string* before sending it —
+                    # the server then rejects its own tool with
+                    # "Input validation error: '{...}' is not of type
+                    # 'object', 'array'". odoo_write never had the problem
+                    # because its "values" is a plain "type": "object".
+                    # See tests/test_odoo_mcp_server.py::TestCreateValuesSchema.
                     "values": {
-                        "type": ["object", "array"],
+                        "type": "object",
+                        "description": "Field values for the new record, as a dict. For mass creation use 'values_list' instead."
+                    },
+                    "values_list": {
+                        "type": "array",
                         "items": {"type": "object"},
-                        "description": "Field values for the new record (dict), or a list of dicts for mass creation"
+                        "description": "Optional. List of dicts for mass creation. Use instead of 'values', not together with it."
                     }
                 },
-                "required": ["model", "values"]
+                "required": ["model"]
             }
         ),
         Tool(
@@ -897,9 +910,21 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "odoo_create":
+            values = arguments.get("values")
+            values_list = arguments.get("values_list")
+            if values is not None and values_list is not None:
+                return [TextContent(type="text", text=(
+                    "Error: pass either 'values' (a dict, for one record) or "
+                    "'values_list' (a list of dicts, for mass creation), not both."
+                ))]
+            if values is None and values_list is None:
+                return [TextContent(type="text", text=(
+                    "Error: 'values' is required (a dict of field values), or "
+                    "'values_list' for mass creation."
+                ))]
             result = client.create(
                 model=arguments["model"],
-                values=arguments["values"]
+                values=values if values is not None else values_list
             )
             if isinstance(result, list):
                 return [TextContent(type="text", text=f"Created {len(result)} records with IDs: {result}")]

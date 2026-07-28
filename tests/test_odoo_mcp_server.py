@@ -1062,5 +1062,146 @@ class TestHttpClientCache:
         )
 
 
+class TestCreateValuesSchema:
+    """odoo_create must never advertise a union-typed property.
+
+    Regression guard. `values` used to be declared as
+    ``{"type": ["object", "array"], "items": {"type": "object"}}``. Clients
+    serialize a union-typed property to a JSON *string* before sending it, so
+    every well-formed call came back as::
+
+        Input validation error: '{"partner_id": 13528}' is not of type 'object', 'array'
+
+    The sibling tool odoo_write was unaffected, and its `values` is a plain
+    ``{"type": "object"}`` — that difference was the whole bug. Mass creation
+    now lives in its own single-typed `values_list` property.
+    """
+
+    @pytest.fixture
+    def create_client(self):
+        import odoo_mcp_server
+
+        client = Mock()
+        client.create = Mock(return_value=42)
+        with patch.object(odoo_mcp_server, "get_odoo_client", return_value=client):
+            yield client
+
+    @pytest.mark.asyncio
+    async def test_no_tool_declares_a_union_type(self):
+        """No property anywhere may use a list-valued "type"."""
+        from odoo_mcp_server import list_tools
+
+        offenders = []
+
+        def walk(node, path):
+            if not isinstance(node, dict):
+                return
+            if isinstance(node.get("type"), list):
+                offenders.append(path)
+            for key in ("properties", "items", "additionalProperties"):
+                child = node.get(key)
+                if key == "properties" and isinstance(child, dict):
+                    for name, sub in child.items():
+                        walk(sub, f"{path}.{name}")
+                else:
+                    walk(child, f"{path}.{key}")
+
+        for tool in await list_tools():
+            walk(tool.inputSchema, tool.name)
+
+        assert offenders == [], f"union-typed properties found: {offenders}"
+
+    @pytest.mark.asyncio
+    async def test_create_schema_shape(self):
+        from odoo_mcp_server import list_tools
+
+        tools = {tool.name: tool for tool in await list_tools()}
+        props = tools["odoo_create"].inputSchema["properties"]
+
+        assert props["values"]["type"] == "object"
+        assert props["values_list"]["type"] == "array"
+        assert props["values_list"]["items"] == {"type": "object"}
+        # Neither is required on its own; the handler enforces exactly-one.
+        assert tools["odoo_create"].inputSchema["required"] == ["model"]
+
+    @pytest.mark.asyncio
+    async def test_create_schema_accepts_a_dict_and_rejects_a_string(self):
+        """Validate against the advertised schema the way the SDK does."""
+        jsonschema = pytest.importorskip("jsonschema")
+        from odoo_mcp_server import list_tools
+
+        tools = {tool.name: tool for tool in await list_tools()}
+        schema = tools["odoo_create"].inputSchema
+
+        jsonschema.validate(
+            {"model": "sale.order", "values": {"partner_id": 13528}}, schema
+        )
+        jsonschema.validate(
+            {"model": "sale.order", "values_list": [{"partner_id": 13528}]}, schema
+        )
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(
+                {"model": "sale.order", "values": '{"partner_id": 13528}'}, schema
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_with_values_dict(self, create_client):
+        from odoo_mcp_server import call_tool
+
+        result = await call_tool(
+            "odoo_create",
+            {"company": "c", "model": "sale.order", "values": {"partner_id": 13528}},
+        )
+
+        create_client.create.assert_called_once_with(
+            model="sale.order", values={"partner_id": 13528}
+        )
+        assert "Created record with ID: 42" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_create_with_values_list(self, create_client):
+        from odoo_mcp_server import call_tool
+
+        create_client.create.return_value = [1, 2]
+        rows = [{"partner_id": 1}, {"partner_id": 2}]
+
+        result = await call_tool(
+            "odoo_create",
+            {"company": "c", "model": "sale.order", "values_list": rows},
+        )
+
+        create_client.create.assert_called_once_with(model="sale.order", values=rows)
+        assert "Created 2 records with IDs: [1, 2]" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_create_rejects_both(self, create_client):
+        from odoo_mcp_server import call_tool
+
+        result = await call_tool(
+            "odoo_create",
+            {
+                "company": "c",
+                "model": "sale.order",
+                "values": {"partner_id": 1},
+                "values_list": [{"partner_id": 2}],
+            },
+        )
+
+        assert "not both" in result[0].text
+        create_client.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_rejects_neither(self, create_client):
+        from odoo_mcp_server import call_tool
+
+        result = await call_tool(
+            "odoo_create", {"company": "c", "model": "sale.order"}
+        )
+
+        assert "Error" in result[0].text
+        assert "required" in result[0].text
+        create_client.create.assert_not_called()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
