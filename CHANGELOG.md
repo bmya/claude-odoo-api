@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased] - 2026-07-28 — La reescritura del registro preserva el owner
+
+### Fixed
+- **Emitir una key dejaba al servidor sin poder leer el registro.** `write_raw()`
+  reescribe de forma atómica (tempfile + rename), lo que crea un **inodo nuevo**
+  propiedad de quien corrió el CLI: root en el host de despliegue, mientras el
+  contenedor lee como uid 1000. El `chown -R 1000:1000` estaba documentado sólo
+  para la puesta en marcha, así que a partir de la primera emisión el archivo
+  quedaba ilegible para el servidor. Y el fallo **no hace ruido**: el loader
+  conserva la última copia buena, loguea un ERROR y marca `/readyz` como
+  `"stale": true` (availability sobre freshness), de modo que la emisión se ve
+  exitosa y la key nueva da 401. Detectado en producción con dos keys recién
+  emitidas: `/readyz` devolvía `{"status":"ready","stale":true}` mientras las
+  keys viejas —las de la copia cacheada— seguían funcionando.
+  Ahora la reescritura **hereda el uid/gid que el archivo ya tenía**, así que el
+  `chown` inicial es lo único que hay que hacer a mano. Si no se puede preservar
+  (no sos root), se avisa por stderr con el `chown` exacto y la escritura igual
+  se completa.
+- Todo `--write` recuerda ahora verificar `/readyz`, y crear el registro desde
+  cero avisa de qué uid quedó dueño frente al uid 1000 del contenedor.
+
 ## [Unreleased] - 2026-07-27 (ter) — La barra final del endpoint deja de importar
 
 ### Fixed

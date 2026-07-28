@@ -50,6 +50,10 @@ EXIT_ERROR = 1
 EXIT_USAGE = 2
 
 DEFAULT_FILE = os.getenv("BMYA_API_KEYS_FILE") or "bmya-api-keys.json"
+# The uid the container runs as (Dockerfile: `useradd -m -u 1000 odoo`). Only
+# used to phrase the hint printed when the registry is created from scratch;
+# every later rewrite inherits the ownership the file already had.
+CONTAINER_UID = int(os.getenv("BMYA_KEYS_CONTAINER_UID", "1000"))
 # Deliberately raw: every use funnels through render_client_snippets(), which
 # normalizes the trailing slash, so there is exactly one place that does it.
 DEFAULT_SERVER_URL = os.getenv("BMYA_MCP_SERVER_URL") or ""
@@ -79,12 +83,55 @@ def read_raw(path: str, *, allow_missing: bool = False) -> dict:
     return data
 
 
+def _owner_of(path: str):
+    """``(uid, gid)`` of an existing path, or ``None`` if it cannot be stat'd."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_uid, st.st_gid)
+
+
+def _preserve_ownership(tmp: str, uid: int, gid: int, path: str) -> None:
+    """Give the replacement file the ownership the registry already had.
+
+    Verified in production 2026-07-28, and the reason this function exists: the
+    atomic rewrite below creates a **new inode**, owned by whoever ran the CLI.
+    On the deployment host that is root, while the container reads the registry
+    as uid 1000 -- so a plain rename leaves the server unable to read its own
+    key registry.
+
+    That failure is silent by design elsewhere: the loader keeps its last good
+    snapshot, logs an ERROR and flips ``/readyz`` to ``"stale": true`` rather
+    than locking every client out (see ``get_registry`` in ``bmya_auth``). The
+    operator sees a *successful* mint whose key then 401s, with nothing in
+    between to connect the two. Preserving ownership here removes the trap
+    instead of documenting it.
+    """
+    if _owner_of(tmp) == (uid, gid):
+        return
+    try:
+        os.chown(tmp, uid, gid)
+    except (OSError, AttributeError) as exc:
+        # Not fatal: the write still happens. But the server may go stale, so
+        # this has to be loud and carry the exact remedy.
+        print(
+            f"warning: could not keep {path} owned by {uid}:{gid} ({exc}).\n"
+            f"         The MCP server may no longer be able to read it "
+            f'(check /readyz for "stale": true). Fix with:\n'
+            f"           sudo chown {uid}:{gid} {path}",
+            file=sys.stderr,
+        )
+
+
 def write_raw(path: str, data: dict) -> None:
     """Write the registry atomically, keeping a .bak of the previous content."""
     data["updated_at"] = _now_iso()
     directory = os.path.dirname(os.path.abspath(path)) or "."
 
+    previous_owner = None
     if os.path.exists(path):
+        previous_owner = _owner_of(path)
         shutil.copy2(path, f"{path}.bak")
 
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".bmya-keys-", suffix=".json")
@@ -95,12 +142,32 @@ def write_raw(path: str, data: dict) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp, 0o600)
+        if previous_owner is not None:
+            _preserve_ownership(tmp, previous_owner[0], previous_owner[1], path)
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
     print(f"Wrote {path} (previous copy at {path}.bak)", file=sys.stderr)
+
+    if previous_owner is None:
+        # First creation: there is no previous owner to inherit, so the only
+        # thing we can do is say who owns it now.
+        current = _owner_of(path)
+        owner = current[0] if current else -1
+        print(
+            f"note: {path} is new and owned by uid {owner}. If it is bind-mounted "
+            f"into the container (which runs as uid {CONTAINER_UID}), chown it or "
+            f"the server cannot read it:\n"
+            f"        sudo chown {CONTAINER_UID}:{CONTAINER_UID} {path}",
+            file=sys.stderr,
+        )
+    print(
+        "note: the server reloads within BMYA_REGISTRY_TTL_SECONDS (default 10); "
+        'confirm with GET /readyz showing "stale": false',
+        file=sys.stderr,
+    )
 
 
 def _split_csv(value):

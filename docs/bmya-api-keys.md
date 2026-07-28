@@ -215,6 +215,23 @@ sudo chown -R 1000:1000 deploy/config && sudo chmod 600 deploy/config/bmya-api-k
 El contenedor corre como uid 1000 y los bind mounts conservan los uid del host. El
 servidor avisa por log si el archivo es legible más allá de su dueño.
 
+Esto hay que hacerlo **una sola vez**, al crear el registro: a partir de ahí cada
+`--write` **hereda el owner que el archivo ya tenía** (`_preserve_ownership` en
+`tools/bmya-keys.py`). Es necesario porque la reescritura atómica crea un inodo
+nuevo, que sin eso queda del usuario que corrió el CLI —root en el host— y el
+contenedor, que lee como uid 1000, deja de poder abrirlo.
+
+> ⚠️ **Ese fallo es silencioso**, y ya pasó en producción (2026-07-28): el loader
+> conserva la última copia buena, loguea un ERROR y pone `/readyz` en
+> `"stale": true` en vez de dejar a todos afuera. O sea que la emisión se ve
+> exitosa y la key nueva **da 401**, sin nada que conecte una cosa con la otra.
+> Si el CLI no puede preservar el owner (no sos root), avisa por stderr con el
+> `chown` exacto. Después de cualquier `--write`, confirmá:
+>
+> ```bash
+> curl -s https://mcp.bmya.cloud/readyz   # -> {"status":"ready","stale":false}
+> ```
+
 El archivo no tiene secretos utilizables (sólo hashes), pero **perderlo deja a
 todos afuera**: incluilo en el backup. Si se pierde, hay que reemitir todas las
 keys.

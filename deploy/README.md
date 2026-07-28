@@ -52,6 +52,11 @@ El bind mount conserva los uid del host y el contenedor corre como uid 1000:
 sudo chown -R 1000:1000 deploy/config && sudo chmod 600 deploy/config/bmya-api-keys.json
 ```
 
+Sólo hace falta una vez: los `--write` siguientes heredan ese owner. Si el CLI no
+puede preservarlo, avisa por stderr — no lo ignores, es lo que deja al servidor
+`stale` y hace que una key recién emitida devuelva 401. Ver
+[../docs/bmya-api-keys.md](../docs/bmya-api-keys.md).
+
 Levantar, en cualquiera de las dos formas:
 
 ```bash

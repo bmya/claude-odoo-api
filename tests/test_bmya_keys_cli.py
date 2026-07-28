@@ -312,6 +312,77 @@ class TestCmdSnippet:
         assert "revoked" in capsys.readouterr().err.lower()
 
 
+class TestWriteRawOwnership:
+    """The atomic rewrite creates a new inode owned by whoever ran the CLI. On
+    the deploy host that is root while the container reads as uid 1000, and the
+    loader's response to an unreadable registry is to keep its last good copy
+    and go "stale" -- so the mint looks successful and the key 401s. Verified in
+    production 2026-07-28. These tests pin the ownership handling."""
+
+    def _registry(self, tmp_path):
+        path = tmp_path / "reg.json"
+        bmya_keys_cli.write_raw(str(path), {"version": 1, "grants": []})
+        return str(path)
+
+    def _pretend_owned_by_container(self, monkeypatch, path):
+        """Report the registry as owned by uid/gid 1000, the state a correctly
+        set-up deployment is in. Patches the helper rather than os.stat, which
+        pytest itself calls."""
+        real = bmya_keys_cli._owner_of
+        monkeypatch.setattr(
+            bmya_keys_cli, "_owner_of", lambda p: (1000, 1000) if p == path else real(p)
+        )
+
+    def test_rewrite_inherits_the_previous_owner(self, tmp_path, monkeypatch):
+        path = self._registry(tmp_path)
+        calls = []
+        self._pretend_owned_by_container(monkeypatch, path)
+        monkeypatch.setattr(bmya_keys_cli.os, "chown", lambda p, u, g: calls.append((u, g)))
+
+        bmya_keys_cli.write_raw(path, {"version": 1, "grants": []})
+        assert calls == [(1000, 1000)]
+
+    def test_no_chown_when_ownership_already_matches(self, tmp_path, monkeypatch):
+        path = self._registry(tmp_path)
+
+        def explode(*_args):
+            raise AssertionError("chown must not be called when the owner already matches")
+
+        monkeypatch.setattr(bmya_keys_cli.os, "chown", explode)
+        bmya_keys_cli.write_raw(path, {"version": 1, "grants": []})
+
+    def test_failed_chown_warns_with_the_exact_remedy(self, tmp_path, monkeypatch, capsys):
+        """Not being root is the common case; the write still has to succeed,
+        but the operator must be told or the server silently goes stale."""
+        path = self._registry(tmp_path)
+        self._pretend_owned_by_container(monkeypatch, path)
+
+        def denied(*_args):
+            raise PermissionError("Operation not permitted")
+
+        monkeypatch.setattr(bmya_keys_cli.os, "chown", denied)
+
+        bmya_keys_cli.write_raw(path, {"version": 1, "grants": ["x"]})
+
+        err = capsys.readouterr().err
+        assert "warning" in err
+        assert f"sudo chown 1000:1000 {path}" in err
+        assert "stale" in err
+        # The write itself must still have gone through.
+        assert json.loads(open(path).read())["grants"] == ["x"]
+
+    def test_new_registry_hints_about_the_container_uid(self, tmp_path, capsys):
+        path = str(tmp_path / "fresh.json")
+        bmya_keys_cli.write_raw(path, {"version": 1, "grants": []})
+        err = capsys.readouterr().err
+        assert "is new and owned by uid" in err
+        assert f"sudo chown 1000:1000 {path}" in err
+
+    def test_every_write_reminds_to_check_readyz(self, tmp_path, capsys):
+        bmya_keys_cli.write_raw(str(tmp_path / "reg.json"), {"version": 1, "grants": []})
+        assert '"stale": false' in capsys.readouterr().err
+
+
 class TestCmdValidate:
     """No example registry is checked into the repo (a real one never belongs in
     git, and a duplicate next to deploy/config/bmya-api-keys.json -- the one
