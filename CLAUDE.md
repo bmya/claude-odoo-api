@@ -344,6 +344,19 @@ To add a new Odoo operation:
    - **IMPORTANT:** Add `company` parameter as required for all Odoo operations
    - Mark other required parameters
 
+**NEVER declare a union type in an inputSchema.** A property written as
+`{"type": ["object", "array"]}` is stripped of its type by the client, and a
+type-less property gets serialized to a JSON **string** before it is sent — so
+the server then rejects its own tool with `Input validation error: '{...}' is
+not of type 'object'`. This made `odoo_create` unusable from every client while
+`odoo_write` (a plain `{"type": "object"}`) worked. Verified A/B: the same
+client caches `odoo_write.values` as `{"type": "object", ...}` and
+`odoo_create.values` as `{"description": ...}` with no type at all.
+If a parameter must accept two shapes, give it **two single-typed properties**
+(`values` / `values_list`) and enforce exactly-one in the handler.
+`tests/test_odoo_mcp_server.py::TestCreateValuesSchema` fails the build if any
+property of any tool declares a list-valued `"type"`.
+
 3. **Add handler in `call_tool()`**
    - Extract `company` argument and get client: `client = get_odoo_client(company)`
    - Extract other arguments
