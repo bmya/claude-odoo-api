@@ -72,6 +72,33 @@ BMYA_ALLOWED_URL_SUFFIXES = _env_list("BMYA_ALLOWED_URL_SUFFIXES")
 BMYA_ALLOW_INSECURE_URLS = _env_flag("BMYA_ALLOW_INSECURE_URLS")
 
 
+# Allowlist of Odoo business methods that odoo_call_method may invoke, and the
+# ceiling every grant's own allowed_methods is intersected against.
+#
+# It lives here rather than in odoo_mcp_server so the admin console can read it
+# without importing that module -- which would drag in mcp, requests and Pillow
+# for the sake of three strings. The console needs it to warn that a method
+# typed into the grant form is not on the server list, and will therefore be
+# intersected away by effective_allowed_methods() and silently do nothing.
+DEFAULT_ALLOWED_METHODS = [
+    "calendar.event.action_sync_timesheets",
+    "account.move.action_post",
+    "sale.order.action_confirm",
+]
+
+
+def server_allowed_methods() -> set:
+    """Parse ODOO_MCP_ALLOWED_METHODS, falling back to the defaults.
+
+    Read through os.getenv(name, default) on purpose: an *absent* variable means
+    "use the defaults", while an explicitly empty one means "no methods at all".
+    docker-compose's "${VAR:-}" always injects the key, even empty, which is why
+    deploy/docker-compose.yml deliberately does not declare this variable.
+    """
+    raw = os.getenv("ODOO_MCP_ALLOWED_METHODS", ",".join(DEFAULT_ALLOWED_METHODS))
+    return {m.strip() for m in raw.split(",") if m.strip()}
+
+
 # --- Protocol constants
 
 HEADER_BMYA_KEY = "x-bmya-api-key"

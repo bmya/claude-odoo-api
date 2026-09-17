@@ -35,249 +35,70 @@ Exit codes: 0 ok, 1 validation/runtime error, 2 usage error.
 import argparse
 import json
 import os
-import re
-import shutil
 import sys
-import tempfile
-from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import bmya_auth  # noqa: E402
+import bmya_registry  # noqa: E402
+import bmya_snippets  # noqa: E402
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 
 DEFAULT_FILE = os.getenv("BMYA_API_KEYS_FILE") or "bmya-api-keys.json"
-# The uid the container runs as (Dockerfile: `useradd -m -u 1000 odoo`). Only
-# used to phrase the hint printed when the registry is created from scratch;
-# every later rewrite inherits the ownership the file already had.
-CONTAINER_UID = int(os.getenv("BMYA_KEYS_CONTAINER_UID", "1000"))
 # Deliberately raw: every use funnels through render_client_snippets(), which
 # normalizes the trailing slash, so there is exactly one place that does it.
 DEFAULT_SERVER_URL = os.getenv("BMYA_MCP_SERVER_URL") or ""
 
+# The registry read/write layer and the snippet renderer moved to src/ so the
+# admin console can import them: this file's name has a hyphen, so it is not a
+# valid module identifier and cannot be imported from production code. The CLI
+# is now a thin argparse front end over those two modules.
+#
+# Re-exported under their original names because this module's own surface is
+# what the docs and the existing tests refer to. Note that a test patching
+# `bmya_keys_cli._owner_of` no longer affects write_raw -- it resolves
+# bmya_registry._owner_of now -- which is why those tests moved to
+# tests/test_bmya_registry.py rather than being left to pass vacuously.
+read_raw = bmya_registry.read_raw
+write_raw = bmya_registry.write_raw
+mutate_registry = bmya_registry.mutate_registry
+registry_lock = bmya_registry.registry_lock
+_owner_of = bmya_registry._owner_of
+_preserve_ownership = bmya_registry._preserve_ownership
+_now_iso = bmya_registry.now_iso
+CONTAINER_UID = bmya_registry.CONTAINER_UID
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+normalize_server_url = bmya_snippets.normalize_server_url
+render_client_snippets = bmya_snippets.render_client_snippets
+_slugify = bmya_snippets.slugify
+_split_csv = bmya_snippets.split_csv
 
 
 def _resolve_path(args) -> str:
     return args.file or DEFAULT_FILE
 
 
-def read_raw(path: str, *, allow_missing: bool = False) -> dict:
-    """Read the registry as raw JSON, preserving fields this tool does not know."""
-    if not os.path.exists(path):
-        if allow_missing:
-            return {"version": 1, "updated_at": _now_iso(), "grants": []}
-        raise SystemExit(f"error: registry not found: {path}")
-    with open(path, "r", encoding="utf-8") as handle:
-        try:
-            data = json.load(handle)
-        except json.JSONDecodeError as exc:
-            raise SystemExit(f"error: {path} is not valid JSON: {exc}")
-    if not isinstance(data, dict) or not isinstance(data.get("grants"), list):
-        raise SystemExit(f"error: {path} must be an object with a 'grants' list")
-    return data
-
-
-def _owner_of(path: str):
-    """``(uid, gid)`` of an existing path, or ``None`` if it cannot be stat'd."""
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    return (st.st_uid, st.st_gid)
-
-
-def _preserve_ownership(tmp: str, uid: int, gid: int, path: str) -> None:
-    """Give the replacement file the ownership the registry already had.
-
-    Verified in production 2026-07-28, and the reason this function exists: the
-    atomic rewrite below creates a **new inode**, owned by whoever ran the CLI.
-    On the deployment host that is root, while the container reads the registry
-    as uid 1000 -- so a plain rename leaves the server unable to read its own
-    key registry.
-
-    That failure is silent by design elsewhere: the loader keeps its last good
-    snapshot, logs an ERROR and flips ``/readyz`` to ``"stale": true`` rather
-    than locking every client out (see ``get_registry`` in ``bmya_auth``). The
-    operator sees a *successful* mint whose key then 401s, with nothing in
-    between to connect the two. Preserving ownership here removes the trap
-    instead of documenting it.
-    """
-    if _owner_of(tmp) == (uid, gid):
-        return
-    try:
-        os.chown(tmp, uid, gid)
-    except (OSError, AttributeError) as exc:
-        # Not fatal: the write still happens. But the server may go stale, so
-        # this has to be loud and carry the exact remedy.
-        print(
-            f"warning: could not keep {path} owned by {uid}:{gid} ({exc}).\n"
-            f"         The MCP server may no longer be able to read it "
-            f'(check /readyz for "stale": true). Fix with:\n'
-            f"           sudo chown {uid}:{gid} {path}",
-            file=sys.stderr,
-        )
-
-
-def write_raw(path: str, data: dict) -> None:
-    """Write the registry atomically, keeping a .bak of the previous content."""
-    data["updated_at"] = _now_iso()
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-
-    previous_owner = None
-    if os.path.exists(path):
-        previous_owner = _owner_of(path)
-        shutil.copy2(path, f"{path}.bak")
-
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".bmya-keys-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp, 0o600)
-        if previous_owner is not None:
-            _preserve_ownership(tmp, previous_owner[0], previous_owner[1], path)
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
-    print(f"Wrote {path} (previous copy at {path}.bak)", file=sys.stderr)
-
-    if previous_owner is None:
-        # First creation: there is no previous owner to inherit, so the only
-        # thing we can do is say who owns it now.
-        current = _owner_of(path)
-        owner = current[0] if current else -1
-        print(
-            f"note: {path} is new and owned by uid {owner}. If it is bind-mounted "
-            f"into the container (which runs as uid {CONTAINER_UID}), chown it or "
-            f"the server cannot read it:\n"
-            f"        sudo chown {CONTAINER_UID}:{CONTAINER_UID} {path}",
-            file=sys.stderr,
-        )
-    print(
-        "note: the server reloads within BMYA_REGISTRY_TTL_SECONDS (default 10); "
-        'confirm with GET /readyz showing "stale": false',
-        file=sys.stderr,
-    )
-
-
-def _split_csv(value):
-    if value is None:
-        return None
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
 def _parse_expiry(value):
-    """Accept YYYY-MM-DD or a full ISO-8601 timestamp; store UTC."""
-    if not value:
-        return None
-    text = value.strip()
-    if len(text) == 10:
-        text = f"{text}T23:59:59+00:00"
-    if text.endswith(("Z", "z")):
-        text = text[:-1] + "+00:00"
+    """CLI wrapper: a bad --expires is a usage error, not an exception."""
     try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        raise SystemExit(f"error: --expires is not a valid date: {value}")
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.isoformat()
+        return bmya_snippets.parse_expiry(value)
+    except ValueError as exc:
+        raise SystemExit(f"error: --expires is {exc}")
 
 
-def _slugify(text, fallback: str) -> str:
-    text = re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")
-    return text or fallback
+def _read_raw_or_exit(path: str, *, allow_missing: bool = False) -> dict:
+    """read_raw for the CLI: the library raises, the CLI exits.
 
-
-def normalize_server_url(server_url: str) -> str:
-    """Return the endpoint URL with its trailing slash guaranteed.
-
-    Verified 2026-07-27: the server mounts the MCP transport with Starlette's
-    Mount, which answers the bare path with a 307 to the trailing-slash form,
-    and mcp-remote -- the stdio bridge Claude Desktop needs -- does not follow
-    redirects. A snippet built from ".../mcp" leaves the app stuck on
-    "Connecting to remote server..." and surfaces as "Could not attach to MCP
-    server"; the same URL with the slash connects.
-
-    build_http_app() now also serves the bare path directly, so the slash is no
-    longer load-bearing against a current deployment. This stays because a
-    snippet may be pasted against an older server, and because the operator
-    passing --server-url has no reason to know any of the above.
+    bmya_registry raises RegistryFileError so the console can turn it into a
+    503; keeping SystemExit here preserves this tool's exit codes.
     """
-    server_url = (server_url or "").strip()
-    if not server_url or server_url.endswith("/"):
-        return server_url
-    return server_url + "/"
-
-
-def render_client_snippets(*, name: str, server_url: str, bmya_key: str) -> str:
-    """A ready-to-send block covering both onboarding paths for one key.
-
-    Claude Code supports HTTP + custom headers natively (`claude mcp add
-    --transport http ... --header ...`, verified end to end: connects with no
-    JSON editing and no restart). Claude Desktop's claude_desktop_config.json
-    does not: its schema only accepts stdio entries (command/args/env), so its
-    path goes through the mcp-remote stdio bridge instead. Both are shown
-    because we cannot tell which client a given recipient uses.
-
-    The single place server_url is normalized: both snippets are built from the
-    normalized value, so neither can ship a URL the client cannot connect to.
-    """
-    server_url = normalize_server_url(server_url)
-    code_cmd = (
-        f"claude mcp add --transport http {name} {server_url} \\\n"
-        f'  --header "X-Bmya-Api-Key: {bmya_key}" \\\n'
-        '  --header "X-Odoo-Api-Key: TU_API_KEY_DE_ODOO"'
-    )
-    desktop_json = json.dumps(
-        {
-            "mcpServers": {
-                name: {
-                    "command": "npx",
-                    "args": [
-                        "-y",
-                        "mcp-remote",
-                        server_url,
-                        "--transport",
-                        "http-only",
-                        "--header",
-                        f"X-Bmya-Api-Key: {bmya_key}",
-                        "--header",
-                        "X-Odoo-Api-Key: TU_API_KEY_DE_ODOO",
-                    ],
-                }
-            }
-        },
-        indent=2,
-        ensure_ascii=False,
-    )
-    bar = "=" * 72
-    return (
-        f"{bar}\n"
-        f"Acceso MCP a Odoo -- {name}\n"
-        f"{bar}\n\n"
-        "Antes de usar cualquiera de las dos opciones: genera tu propia API key\n"
-        "en Odoo (Preferencias de usuario -> Seguridad de la cuenta -> Nueva API\n"
-        "key) y reemplaza TU_API_KEY_DE_ODOO por esa key.\n\n"
-        "Opcion A -- Claude Code (un solo comando, sin editar nada):\n\n"
-        f"{code_cmd}\n\n"
-        "Opcion B -- Claude Desktop (la app): pega este bloque dentro de\n"
-        "claude_desktop_config.json (Configuracion -> Developer -> Edit Config)\n"
-        "y reinicia la app por completo para que lo tome:\n\n"
-        f"{desktop_json}\n\n"
-        'Para verificar: pedile al asistente "listá las compañías de Odoo".\n'
-        f"{bar}"
-    )
+    try:
+        return bmya_registry.read_raw(path, allow_missing=allow_missing)
+    except bmya_registry.RegistryFileError as exc:
+        raise SystemExit(f"error: {exc}")
 
 
 # --- Subcommands
@@ -316,12 +137,25 @@ def cmd_new(args) -> int:
 
     path = _resolve_path(args)
     if args.write:
-        data = read_raw(path, allow_missing=True)
-        if any(g.get("key_id") == key_id for g in data["grants"]):
+        # The duplicate check and the append have to happen inside one lock
+        # hold: checked-then-appended across two writers is exactly the race
+        # mutate_registry exists to close.
+        class _Duplicate(Exception):
+            pass
+
+        def _append(data):
+            if any(g.get("key_id") == key_id for g in data["grants"]):
+                raise _Duplicate()
+            data["grants"].append(entry)
+
+        try:
+            mutate_registry(path, _append, allow_missing=True)
+        except _Duplicate:
             print(f"error: key_id {key_id} already present, retry", file=sys.stderr)
             return EXIT_ERROR
-        data["grants"].append(entry)
-        write_raw(path, data)
+        except bmya_registry.RegistryFileError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
 
     if args.json:
         print(json.dumps({"key": plaintext, "entry": entry}, indent=2, ensure_ascii=False))
@@ -375,23 +209,41 @@ def cmd_add(args) -> int:
         entry = entry["entry"]
 
     path = _resolve_path(args)
-    data = read_raw(path, allow_missing=True)
     key_id = entry.get("key_id")
-    if any(g.get("key_id") == key_id for g in data["grants"]):
-        print(f"error: key_id {key_id} is already in {path}", file=sys.stderr)
-        return EXIT_ERROR
-    data["grants"].append(entry)
+
+    class _Duplicate(Exception):
+        pass
+
+    def _append(data):
+        if any(g.get("key_id") == key_id for g in data["grants"]):
+            raise _Duplicate()
+        data["grants"].append(entry)
 
     if args.write:
-        write_raw(path, data)
+        try:
+            mutate_registry(path, _append, allow_missing=True)
+        except _Duplicate:
+            print(f"error: key_id {key_id} is already in {path}", file=sys.stderr)
+            return EXIT_ERROR
+        except bmya_registry.RegistryFileError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
     else:
+        # Dry run: no lock, because nothing is written. The preview can go stale
+        # between here and a later --write, which is what the lock covers.
+        data = _read_raw_or_exit(path, allow_missing=True)
+        try:
+            _append(data)
+        except _Duplicate:
+            print(f"error: key_id {key_id} is already in {path}", file=sys.stderr)
+            return EXIT_ERROR
         print(json.dumps(data, indent=2, ensure_ascii=False))
     return EXIT_OK
 
 
 def cmd_list(args) -> int:
     path = _resolve_path(args)
-    data = read_raw(path)
+    data = _read_raw_or_exit(path)
     grants = [g for g in data["grants"] if args.show_revoked or not g.get("revoked")]
 
     if args.json:
@@ -421,21 +273,38 @@ def cmd_list(args) -> int:
 
 def cmd_revoke(args) -> int:
     path = _resolve_path(args)
-    data = read_raw(path)
 
-    matches = [g for g in data["grants"] if g.get("key_id") == args.key_id]
-    if not matches:
-        print(f"error: no grant with key_id {args.key_id} in {path}", file=sys.stderr)
-        return EXIT_ERROR
+    class _NotFound(Exception):
+        pass
 
-    for grant in matches:
-        if grant.get("revoked"):
-            print(f"note: {args.key_id} was already revoked", file=sys.stderr)
-        grant["revoked"] = True
-        grant["revoked_at"] = _now_iso()
+    def _revoke(data):
+        matches = [g for g in data["grants"] if g.get("key_id") == args.key_id]
+        if not matches:
+            raise _NotFound()
+        for grant in matches:
+            if grant.get("revoked"):
+                print(f"note: {args.key_id} was already revoked", file=sys.stderr)
+            grant["revoked"] = True
+            grant["revoked_at"] = _now_iso()
 
     if args.write:
-        write_raw(path, data)
+        try:
+            data = mutate_registry(path, _revoke)
+        except _NotFound:
+            print(f"error: no grant with key_id {args.key_id} in {path}", file=sys.stderr)
+            return EXIT_ERROR
+        except bmya_registry.RegistryFileError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+    else:
+        data = _read_raw_or_exit(path)
+        try:
+            _revoke(data)
+        except _NotFound:
+            print(f"error: no grant with key_id {args.key_id} in {path}", file=sys.stderr)
+            return EXIT_ERROR
+
+    if args.write:
         print(
             f"Revoked {args.key_id}; it stops working within BMYA_REGISTRY_TTL_SECONDS "
             "with no restart."
@@ -535,7 +404,7 @@ def cmd_validate(args) -> int:
         print(f"INVALID: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
-    raw_count = len(read_raw(path)["grants"])
+    raw_count = len(_read_raw_or_exit(path)["grants"])
     loaded = len(registry.grants_by_hash)
     if loaded != raw_count:
         # Skipped grants are logged as errors by the loader; failing here makes a

@@ -1,5 +1,66 @@
 # Changelog
 
+## [Unreleased] - 2026-09-17 — Emitir dos keys a la vez perdía una, en silencio
+
+### Fixed
+- **Dos escrituras concurrentes del registro dejaban sólo una de las dos keys,
+  sin error de ningún lado.** `write_raw()` es atómico (tempfile + fsync +
+  `os.replace`), pero todos sus llamadores hacen *leer* → mutar → *escribir*, y
+  ese ciclo no lo es: `cmd_new` leía el archivo, agregaba su grant a su copia y
+  escribía. Dos escritores intercalados producen un archivo con **una** de las
+  dos entradas, y las dos emisiones se ven exitosas. El operador se entera
+  cuando el cliente reporta 401 — la misma firma que el bug de ownership del
+  2026-07-28, y igual de difícil de rastrear. Peor: la copia `.bak` se hace
+  *antes* de escribir, así que la carrera también pisa el respaldo y no queda de
+  dónde recuperar.
+  Con un solo operador en una terminal la ventana era inalcanzable. Deja de
+  serlo con la consola web de administración, que es un segundo escritor contra
+  el mismo archivo.
+  Ahora `mutate_registry()` cubre lectura, mutación y escritura con un
+  `flock(LOCK_EX)`. Los lectores (el servidor MCP) **no cambian y no toman
+  nada**: `os.replace` es atómico, así que un lector ve el archivo viejo entero
+  o el nuevo entero. El candado sólo serializa escritores.
+- El candado va sobre `<registry>.lock`, un archivo **aparte**, nunca sobre el
+  registro. No es cosmético: `write_raw` reemplaza el inodo del registro en cada
+  escritura, y un `flock` sostenido sobre un inodo recién desvinculado no protege
+  nada — el escritor siguiente abre el inodo nuevo y bloquea otra cosa.
+- `tests/test_bmya_registry.py::TestLocking::test_concurrent_writers_do_not_lose_a_grant`
+  deja clavado el invariante con dos procesos reales. Verificado que falla al
+  desactivar el candado y pasa con él.
+
+### Changed
+- **`tools/bmya-keys.py` se parte en dos módulos importables.** El archivo tiene
+  un guión en el nombre, así que no es un identificador de módulo válido: los
+  tests lo cargan con `importlib.util.spec_from_file_location`, y eso no es
+  aceptable desde código de producción. La consola necesita exactamente la misma
+  lógica de emisión y revocación.
+  - `src/bmya_registry.py` — `read_raw`, `write_raw`, `_preserve_ownership`,
+    más `registry_lock` y `mutate_registry`. Lanza `RegistryFileError` en vez de
+    `SystemExit`: la política de salida es del CLI, no de la biblioteca.
+  - `src/bmya_snippets.py` — `render_client_snippets`, `normalize_server_url`,
+    `slugify`, `parse_expiry`, `split_csv`. Así la consola renderiza el **mismo**
+    bloque que imprime el CLI, desde la misma función. Importa: la
+    normalización de la barra final fue un arreglo de producción, y una segunda
+    copia del texto no lo tendría.
+  El CLI queda como front end de argparse sobre esos dos módulos, reexporta los
+  nombres originales, y **también toma el candado**. Si sólo lo tomara la
+  consola, un `revoke` por SSH seguiría pisando una emisión hecha desde la web.
+- `DEFAULT_ALLOWED_METHODS` y el parseo de `ODOO_MCP_ALLOWED_METHODS` se mudan de
+  `odoo_mcp_server` a `bmya_auth`, como `server_allowed_methods()`. La consola
+  necesita esa lista para avisar que un método tipeado en el formulario no está
+  en la del servidor y `effective_allowed_methods()` lo va a intersectar hasta
+  hacerlo desaparecer; importar `odoo_mcp_server` para eso arrastraría `mcp`,
+  `requests` y `Pillow`. `odoo_mcp_server.ODOO_ALLOWED_METHODS` queda como alias
+  de módulo porque los tests lo parchean por nombre.
+
+### Nota sobre los tests
+- `TestWriteRawOwnership` se movió entera a `tests/test_bmya_registry.py`, y
+  ahora parchea `bmya_registry`. Es a propósito y es importante: después de la
+  mudanza `write_raw` resuelve `bmya_registry._owner_of`, así que un parche sobre
+  `bmya_keys_cli._owner_of` ya no lo alcanza y esos tests **pasarían sin afirmar
+  nada** — el peor modo de falla para tests que existen para fijar un incidente
+  de producción.
+
 ## [Unreleased] - 2026-07-28 (bis) — `odoo_create` rechazaba todo `values` válido
 
 ### Fixed

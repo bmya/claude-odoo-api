@@ -68,9 +68,10 @@ jobs:
     - name: Check formatting of the new modules (strict)
       run: |
         black --check --line-length 100 \
-          src/bmya_auth.py tools/bmya-keys.py \
+          src/bmya_auth.py src/bmya_registry.py src/bmya_snippets.py \
+          tools/bmya-keys.py \
           tests/conftest.py tests/test_bmya_auth.py tests/test_http_auth.py \
-          tests/test_bmya_keys_cli.py
+          tests/test_bmya_keys_cli.py tests/test_bmya_registry.py
 
     - name: Check code formatting with black (legacy, advisory)
       run: |

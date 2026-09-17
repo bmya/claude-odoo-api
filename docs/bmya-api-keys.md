@@ -169,6 +169,20 @@ python tools/bmya-keys.py validate --file deploy/config/bmya-api-keys.json
 
 Las escrituras son atómicas (tempfile + rename, modo `600`) y dejan un `.bak`.
 
+Además, **todo el ciclo leer→modificar→escribir corre bajo un `flock`** sobre
+`<registro>.lock`, un archivo aparte que se crea solo al lado del registro. El
+candado no es por prolijidad: sin él, dos emisiones simultáneas —o un `revoke`
+por SSH mientras alguien emite desde la consola web— dejan **una sola** de las
+dos entradas, sin error de ningún lado, y pisan el `.bak` en el mismo ciclo. El
+lock va sobre un archivo separado porque la reescritura atómica reemplaza el
+inodo del registro, y un candado sostenido sobre un inodo ya desvinculado no
+protege nada.
+
+Los lectores (el servidor MCP) no toman el candado y no lo necesitan: `os.replace`
+es atómico, así que se lee el archivo viejo entero o el nuevo entero, nunca una
+mezcla. Si ves `another writer has held ... for more than 10s`, hay un proceso
+colgado: buscalo antes de borrar el `.lock`.
+
 ## Diagnóstico
 
 **`404 "No database is selected"`** en cada llamada, aunque la key valide y el

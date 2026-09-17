@@ -74,16 +74,13 @@ READ_ONLY = os.getenv("ODOO_MCP_READONLY", "").lower() in ("1", "true", "yes")
 
 # Allowlist of Odoo business methods that odoo_call_method may invoke.
 # Configurable via ODOO_MCP_ALLOWED_METHODS ("model.method,model.method").
-DEFAULT_ALLOWED_METHODS = [
-    "calendar.event.action_sync_timesheets",
-    "account.move.action_post",
-    "sale.order.action_confirm",
-]
-ODOO_ALLOWED_METHODS = {
-    m.strip()
-    for m in os.getenv("ODOO_MCP_ALLOWED_METHODS", ",".join(DEFAULT_ALLOWED_METHODS)).split(",")
-    if m.strip()
-}
+#
+# The list and its parsing moved to bmya_auth so the admin console can read them
+# without importing this module. Both names stay here as module-level aliases:
+# the tests monkeypatch odoo_mcp_server.ODOO_ALLOWED_METHODS by name, and every
+# call site in this file reads it at call time, so patching keeps working.
+DEFAULT_ALLOWED_METHODS = bmya.DEFAULT_ALLOWED_METHODS
+ODOO_ALLOWED_METHODS = bmya.server_allowed_methods()
 
 
 class OdooClient:
