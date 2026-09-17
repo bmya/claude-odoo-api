@@ -717,6 +717,123 @@ def authorize_tool(
             )
 
 
+# --- Credits (designed, not implemented)
+
+# Off. The body of check_credit() is not written and this must stay 0 until it
+# is: turning it on today makes every tool call raise.
+BMYA_CREDITS_ENABLED = _env_flag("BMYA_CREDITS_ENABLED")
+
+
+class CreditsExhausted(ToolDenied):
+    """No credit left on this connection.
+
+    A subclass of ToolDenied so it needs no new handler: call_tool already
+    catches ToolDenied, audits it as decision="denied" and shows its message to
+    the caller verbatim.
+
+    That surfacing is the whole reason there is no HTTP 402 here. The auth
+    middleware only sees the ASGI scope and headers -- the tool name lives in
+    the JSON-RPC body, which is a stream it must not consume -- so it could
+    never price a call anyway. And a non-200 on POST /mcp reads to an MCP client
+    as a *transport* failure: it tears the session down and the user sees an
+    opaque connection error instead of a sentence explaining they ran out of
+    credit. A tool-level error the model can read and relay keeps the session
+    alive. A distinct 402 would also be an oracle, telling an unauthenticated
+    prober that a key is valid but broke -- exactly what PUBLIC_AUTH_ERROR
+    exists to prevent.
+    """
+
+
+def check_credit(grant: Grant, tool: str) -> None:
+    """Charge one tool call against this grant's credit account.
+
+    A no-op until credits exist. It is called from call_tool today so that the
+    future change is "implement this function" rather than "find the right place
+    in call_tool and thread a new concept through it" -- the call site is the
+    part that is easy to get wrong and hard to review.
+
+    When it is implemented it must NOT do a synchronous round trip per call.
+    That would turn a purely local hot path into one that hard-fails whenever
+    docsonline or its Mongo is unavailable, which is a serious downgrade for a
+    service that today has no external runtime dependency at all. The shape that
+    fits is: the usage journal is flushed to a metering endpoint in the
+    background, the response carries the current balance, and this function
+    reads only that in-memory snapshot -- zero network on the tool path.
+    """
+    if not BMYA_CREDITS_ENABLED:
+        return
+    raise NotImplementedError("BMYA_CREDITS_ENABLED=1 but no credits backend is implemented yet")
+
+
+# --- Usage metering
+#
+# A per-call record, separate from log_audit() and for a different job.
+#
+# log_audit answers "was this allowed" and is emitted *before* the tool runs, so
+# it carries no outcome, no duration and no row count. It also goes to a
+# json-file capped at 10MB x 5, which rotates. None of that can be turned into
+# usage history after the fact -- and usage history is the one input a price per
+# tool call cannot be chosen without. So the record is written now, while the
+# calls are happening, even though nothing bills on it yet.
+
+BMYA_USAGE_DIR = os.getenv("BMYA_USAGE_DIR", "").strip()
+
+_usage_warned_at = 0.0
+
+
+def _usage_warn(message: str, exc: Exception) -> None:
+    """Complain at most once a minute: a broken sink must not flood the log."""
+    global _usage_warned_at
+    now = time.monotonic()
+    if now - _usage_warned_at >= 60:
+        _usage_warned_at = now
+        logger.error("%s: %s", message, exc)
+
+
+def record_usage(
+    *,
+    grant: Optional[Grant],
+    tool: str,
+    mode: Optional[str],
+    decision: str,
+    ok: Optional[bool] = None,
+    rows: Optional[int] = None,
+    ms: Optional[float] = None,
+    err_class: str = "",
+) -> None:
+    """Append one JSON line describing a tool call.
+
+    Never raises and never blocks a tool call: a metering sink that can fail a
+    request is worse than no metering at all.
+
+    ``err_class`` is the exception *class name* only. The messages carry Odoo
+    data (record values, field names, database contents) and this file is not
+    the place for them -- the same reason log_audit never logs a key.
+    """
+    if not BMYA_USAGE_DIR:
+        return
+    try:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        path = os.path.join(BMYA_USAGE_DIR, f"{day}.jsonl")
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "key_id": grant.key_id if grant else None,
+            "database": grant.database if grant else None,
+            "tool": tool,
+            "mode": mode,
+            "decision": decision,
+            "ok": ok,
+            "rows": rows,
+            "ms": round(ms, 1) if ms is not None else None,
+            "err_class": err_class or None,
+        }
+        os.makedirs(BMYA_USAGE_DIR, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        _usage_warn("Could not write the usage record", exc)
+
+
 def log_audit(
     *,
     grant: Optional[Grant],

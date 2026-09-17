@@ -1,0 +1,19 @@
+# Dependencies for the admin console (src/bmya_console/), built as its own
+# image from Dockerfile.console.
+#
+# Deliberately standalone -- it does NOT include requirements.txt. The console
+# needs none of the MCP server's runtime (mcp, Pillow, PyYAML), and keeping the
+# two sets apart means pip never has to satisfy fastapi's and mcp's starlette
+# ranges at the same time.
+#   pip install -r requirements-console.txt
+
+fastapi>=0.110
+uvicorn>=0.30
+jinja2>=3.1
+# Required by FastAPI's Form(...) -- without it every form POST is a 500 at
+# runtime, not an import error, so it is easy to miss until deploy.
+python-multipart>=0.0.9
+# Required by starlette.middleware.sessions.SessionMiddleware.
+itsdangerous>=2.1
+# Odoo reachability probe and the /readyz poll against the MCP server.
+requests>=2.31

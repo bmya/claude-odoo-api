@@ -1,5 +1,126 @@
 # Changelog
 
+## [Unreleased] - 2026-09-17 (bis) — Consola web para emitir y revocar keys
+
+### Added
+- **`src/bmya_console/`: una consola web que reemplaza al `ssh barbol` + CLI.**
+  Hasta ahora, darle acceso MCP a un cliente exigía la llave SSH del host, y no
+  quedaba registro de quién había emitido qué. La consola tiene formulario con
+  URL, base, modo, modelos denegados, métodos y expiración; muestra el token
+  **una sola vez** junto al bloque de onboarding listo para copiar; y lista,
+  edita y revoca.
+  Es un **segundo contenedor** (`Dockerfile.console`, servicio `bmya-console`),
+  no un agregado al servidor MCP: ese servicio está endurecido para poder
+  exponerse por Traefik —filesystem raíz read-only, config `:ro`, sin estado y
+  sin superficie de administración— y meterle un formulario de login y un camino
+  de escritura sería gastar esa postura.
+  Publica sólo en la IP de VLAN, como el servidor. Se entra por
+  `ssh -L 8081:10.0.0.14:8081 barbol`.
+- **El formulario resuelve la ambigüedad `null` vs `[]` de `allowed_methods`.**
+  Es el único campo del esquema donde ausente ≠ vacío, y una caja de texto sólo
+  expresa dos de los tres estados: una caja vacía es ambigua entre "hereda la
+  lista del servidor" y "ningún método", que son resultados opuestos. Van tres
+  radios con la semántica escrita en castellano, y **elegir "sólo estos" con la
+  caja vacía es un error 400**, nunca un `[]` silencioso. El estado peligroso hay
+  que elegirlo por su nombre.
+- **Probe previo a la emisión.** Sin credenciales de Odoo no se puede hacer una
+  llamada autenticada, pero sí distinguir el modo de falla más caro que ya
+  documentábamos: un nombre de base de Odoo.sh vencido (el sufijo de build que
+  cambia en cada reconstrucción) responde `404 "No database is selected"`,
+  mientras que un `401` significa que la instancia contestó y aceptó la base. Es
+  advisory: nunca bloquea la emisión, porque una instancia puede estar caída.
+- **Bitácora de uso (`BMYA_USAGE_DIR`).** Una línea JSON por llamada a tool
+  —`key_id`, base, tool, modo, resultado, filas, ms, clase de excepción— en un
+  volumen aparte, resumida en `/usage`. No cobra nada.
+  La línea de auditoría que ya existía no sirve para esto: se emite **antes** de
+  que corra la tool, así que no tiene resultado, ni duración, ni filas, y vive en
+  un json-file de 10MB × 5 que rota. Nada de eso se puede reconstruir después, y
+  es el único insumo sin el cual habría que ponerle precio a una llamada a
+  ciegas. Escribirla nunca puede hacer fallar una llamada.
+  `err_class` guarda sólo el nombre de la excepción: los mensajes llevan datos de
+  Odoo, por la misma razón por la que `log_audit` no loguea keys.
+- `tools/bmya-console-operator.py` para acuñar credenciales de operador.
+
+### Security
+- Autenticación con **una clave por persona**, no una compartida. Se guarda sólo
+  el sha256 (`bmya_auth.hash_key` + `hmac.compare_digest`, las mismas primitivas
+  que el registro), y una clave compartida no diría *quién* emitió cada key, que
+  es la mitad del valor de la consola.
+  Nota: el pedido original era Google Auth restringido a `@bmya.cl`. Se pospuso
+  porque Google no acepta como redirect URI ni una IP cruda ni `http://` fuera
+  de `localhost`, y la consola es VLAN-only. `auth.py` expone `authenticate()`
+  como costura para que un `oidc.py` entre después sin tocar rutas ni plantillas.
+- **Fail-closed:** `BMYA_CONSOLE_OPERATORS` vacío significa que **no entra
+  nadie**, y `/readyz` devuelve 503. No es pedantería: `"${VAR:-}"` en compose
+  inyecta un string vacío explícito —este repo ya documenta esa trampa— así que
+  es el error de configuración más probable que hay. Si vacío significara "sin
+  chequeo", ese error publicaría la consola en silencio.
+- La key en claro va **sólo en el cuerpo de la respuesta POST**. No hay redirect
+  que la lleve y **no existe** —ni puede existir— una ruta `GET` que la muestre
+  de nuevo: eso la pondría en el historial del navegador y en el access log.
+  Respuesta con `no-store`; en toda la app, `Referrer-Policy: no-referrer`,
+  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`. Un test verifica
+  que el texto plano no aparece en `caplog.text` en ningún nivel.
+- Cookie de sesión firmada, `HttpOnly`, `SameSite=Lax` (no `Strict`: `Strict` no
+  viaja en navegaciones top-level cross-site, que es la forma de un callback
+  OAuth). `Secure` por variable, en `0` mientras sea HTTP plano — una cookie
+  `Secure` sobre HTTP se setea y no vuelve nunca: loop infinito de login.
+- CSRF por sesión en toda ruta que muta, más el `SameSite=Lax`.
+- **`odoo_url`, `database`, `mode`, `key_id` y `key_sha256` son inmutables**, y
+  un POST que los traiga se rechaza con 400 en vez de ignorarlos: cambiarlos
+  reapunta una credencial que el cliente ya tiene, y un `readonly → readwrite`
+  escalaría en silencio una key ya instalada en su configuración.
+- El formulario valida con **la misma** `validate_odoo_url()` que usa el
+  servidor, y además pasa la entrada armada por `_parse_grant()` antes de
+  escribir: "la consola no puede emitir una key que el servidor rechace" pasa de
+  aspiración a propiedad estructural.
+- El probe sale sólo contra URLs que ya pasaron `validate_odoo_url()` —es una
+  salida HTTP hacia una dirección que tipeó un operador, o sea un vector de SSRF—
+  y con `allow_redirects=False`, porque un 302 a `169.254.169.254` caminaría
+  derecho al metadata service.
+
+### Changed
+- `deploy/docker-compose.yml`: servicio `bmya-console` y volumen `bmya-usage`.
+  La política de URL (`BMYA_ALLOWED_URL_SUFFIXES`, `BMYA_ALLOW_INSECURE_URLS`)
+  pasa a un **ancla YAML compartida**: `validate_odoo_url()` las lee como
+  constantes en tiempo de import, así que si difirieran entre los dos servicios
+  la consola emitiría keys que el servidor rechaza —una key muerta, sin ruido— o
+  rechazaría keys que sí aceptaría.
+- `call_tool` se parte en un envoltorio que mide y un `_dispatch_tool` que
+  resuelve. El grant se vuelve a resolver en el envoltorio en vez de sacarlo del
+  handler: es el mismo intercambio que ya hace y documenta el middleware de
+  auth (un strip, un sha256, un lookup y un `compare_digest`), y así ninguna capa
+  tiene que meter mano en la otra.
+- `bmya_auth.check_credit()`: no-op con su punto de llamada ya enhebrado en
+  `call_tool`, para que el día que existan créditos el cambio sea "implementar el
+  cuerpo" y no "encontrar el lugar correcto y enhebrar un concepto nuevo".
+  `CreditsExhausted` hereda de `ToolDenied` a propósito: `call_tool` ya lo
+  captura, lo audita y muestra su mensaje textual. **No hay HTTP 402 en ningún
+  lado** — un no-200 en `POST /mcp` lo leen los clientes MCP como falla de
+  *transporte*, tiran la sesión y el usuario ve un error opaco en vez de una
+  frase que explique que se quedó sin saldo; y un 402 sería además un oráculo
+  que distingue "key válida sin saldo" de "key inválida", justo lo que
+  `PUBLIC_AUTH_ERROR` evita.
+- `deploy/.env.example` y `deploy/README.md`: bloque de la consola, el túnel SSH,
+  el montaje `:rw` y por qué `read_only: true` sigue en pie.
+
+### Fixed
+- **Deriva de hostname:** `deploy/.env.example` sembraba
+  `BMYA_MCP_SERVER_URL=https://odoo-mcp.bmya.cloud/mcp/`, que es el valor que
+  `render_client_snippets()` mete en **cada** bloque que se le manda a un
+  cliente, mientras que producción y el wiki de infraestructura dicen
+  `mcp.bmya.cloud`. Cada snippet emitido con el default documentado llevaba un
+  hostname que no resuelve. Con la consola esto escalaba.
+- Formato `black` en `tests/test_http_auth.py` y `tests/test_bmya_keys_cli.py`,
+  que están en la lista estricta de CI y que la versión actual de `black`
+  —CI la instala sin pin— ya rechazaba.
+
+### Verificado extremo a extremo
+Consola y servidor MCP levantados de verdad, contra un registro real: emitir por
+HTTP → la key devuelve **200** contra `/mcp` → revocar desde la consola →
+**401** dentro del TTL, sin reiniciar nada, con `reason=revoked key_id=…` en la
+auditoría. Una key inventada da 401 y el texto plano no queda en el registro.
+
 ## [Unreleased] - 2026-09-17 — Emitir dos keys a la vez perdía una, en silencio
 
 ### Fixed

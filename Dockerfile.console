@@ -1,0 +1,58 @@
+# Admin console (src/bmya_console/) -- a SEPARATE image from the MCP server.
+#
+# Why a second Dockerfile and not a --target on the existing one:
+#
+# 1. deploy/docker-compose.portainer.yml documents the exact build command
+#    `docker build -t ghcr.io/bmya/odoo-mcp-server:latest .`. A plain build with
+#    no --target builds the LAST stage, so appending console stages to
+#    Dockerfile would silently change what that documented command produces.
+# 2. The console needs none of the Pillow apt libraries the server installs in
+#    both of its stages, so this image is a plain slim base with no apt at all.
+# 3. fastapi and mcp each pin starlette ranges. Two images means pip never has
+#    to satisfy both at once.
+
+FROM python:3.12-slim AS builder
+
+WORKDIR /app
+
+COPY requirements-console.txt .
+RUN pip install --no-cache-dir --user -r requirements-console.txt
+
+# Final stage
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Same uid as the MCP server, and this is load-bearing rather than tidy: the
+# console writes the registry, and bmya_registry._preserve_ownership only skips
+# the chown when the new file already has the owner the old one had. Matching
+# uid 1000 is what lets the container keep cap_drop: ALL (no CAP_CHOWN) and
+# still leave a file the server can read.
+RUN useradd -m -u 1000 odoo && chown -R odoo:odoo /app
+
+# --chown on the copy, not a later chown: the deps are installed with --user
+# into /root/.local in the builder, and copying them in as root would leave the
+# odoo user unable to import anything.
+COPY --from=builder --chown=odoo:odoo /root/.local /home/odoo/.local
+
+# bmya_auth, bmya_registry and bmya_snippets are shared with the MCP server and
+# are imported as flat modules from src/, exactly as they are there.
+COPY --chown=odoo:odoo src/ ./src/
+COPY --chown=odoo:odoo tools/ ./tools/
+
+USER odoo
+
+ENV PATH=/home/odoo/.local/bin:$PATH
+ENV PYTHONPATH=/app/src
+
+EXPOSE 8081
+
+# /readyz, not /health: it returns 503 when the registry is unreadable, when the
+# config directory is not writable, or when no operator is configured -- so a
+# bad mount or an empty operator list fails the deploy loudly instead of
+# surfacing as a 500 on somebody's first mint.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import os,urllib.request; \
+urllib.request.urlopen('http://127.0.0.1:'+os.getenv('BMYA_CONSOLE_HTTP_PORT','8081')+'/readyz', timeout=5).read()"
+
+CMD ["python", "src/bmya_console/main.py"]

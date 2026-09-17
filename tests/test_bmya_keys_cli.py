@@ -90,17 +90,13 @@ class TestSnippetUrlsAlwaysEndInASlash:
             bmya_key="bmya_ro_abc123_secretsecretsecretsecretsecretsecretsecret",
         )
 
-    @pytest.mark.parametrize(
-        "given", ["https://mcp.bmya.cloud/mcp", "https://mcp.bmya.cloud/mcp/"]
-    )
+    @pytest.mark.parametrize("given", ["https://mcp.bmya.cloud/mcp", "https://mcp.bmya.cloud/mcp/"])
     def test_claude_code_command_uses_the_slash_form(self, given):
         text = self._render(given)
         assert "https://mcp.bmya.cloud/mcp/ \\" in text
         assert "https://mcp.bmya.cloud/mcp \\" not in text
 
-    @pytest.mark.parametrize(
-        "given", ["https://mcp.bmya.cloud/mcp", "https://mcp.bmya.cloud/mcp/"]
-    )
+    @pytest.mark.parametrize("given", ["https://mcp.bmya.cloud/mcp", "https://mcp.bmya.cloud/mcp/"])
     def test_desktop_args_use_the_slash_form(self, given):
         text = self._render(given)
         start = text.index('{\n  "mcpServers"')

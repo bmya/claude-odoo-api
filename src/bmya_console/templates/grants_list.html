@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Keys · Consola MCP{% endblock %}
+{% block content %}
+
+{% if readyz.configured %}
+  {% if not readyz.reachable %}
+    <p class="banner warn">No se puede consultar <code>/readyz</code> del servidor MCP ({{ readyz.error }}). No sé si tomó los últimos cambios.</p>
+  {% elif readyz.stale %}
+    <p class="banner warn">
+      <strong>El servidor MCP está <code>stale</code>.</strong>
+      Escribió el registro pero no pudo releerlo, así que sigue usando su última copia buena:
+      una key recién emitida va a devolver 401 y una revocación no toma efecto.
+      Casi siempre es el dueño del archivo. Revisá que sea <code>1000:1000</code>.
+    </p>
+  {% endif %}
+{% endif %}
+
+<h1>Keys emitidas</h1>
+<p class="muted">
+  {{ rows|length }} de {{ total }} en el registro.
+  {% if show_revoked %}<a href="/grants">ocultar revocadas</a>{% else %}<a href="/grants?show_revoked=1">ver revocadas</a>{% endif %}
+</p>
+
+{% if not rows %}
+  <div class="card"><p class="muted">No hay keys para mostrar. <a href="/grants/new">Emitir la primera</a>.</p></div>
+{% else %}
+<table>
+  <tr>
+    <th>key_id</th><th>Modo</th><th>Base</th><th>Etiqueta</th>
+    <th>Emitida por</th><th>Expira</th><th>Estado</th>
+  </tr>
+  {% for row in rows %}
+  <tr>
+    <td><a href="/grants/{{ row.grant.key_id }}"><code>{{ row.grant.key_id }}</code></a></td>
+    <td>{{ row.grant.mode }}</td>
+    <td><code>{{ row.grant.database }}</code></td>
+    <td>{{ row.grant.label or "—" }}</td>
+    <td>{{ row.created_by }}</td>
+    <td>{{ row.grant.expires_at or "—" }}</td>
+    <td><span class="pill {{ row.status.split(' ')[0] }}">{{ row.status }}</span></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}

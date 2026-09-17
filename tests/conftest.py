@@ -114,3 +114,92 @@ def headers_factory():
         return Headers(raw)
 
     return _make
+
+
+# --- Admin console fixtures
+#
+# The console is a second service in the same repo; these live here rather than
+# in a console-only conftest so a test can mix both (mint through the console,
+# then resolve the key through bmya_auth, which is the check that matters).
+
+CONSOLE_OPERATOR = "daniel@bmya.cl"
+CONSOLE_KEY = "bmyacon_" + "k" * 43
+CONSOLE_SESSION_SECRET = "test-session-secret"
+
+
+@pytest.fixture
+def console_settings(tmp_path, monkeypatch):
+    """A Settings pointing at an empty temp registry and meta file.
+
+    Also invalidates bmya_auth's module-level registry cache on both sides and
+    points it at the same file, so a test can mint through the console and then
+    resolve the plaintext through the server's own code path. That cache is the
+    documented source of order-dependent flakes.
+    """
+    from bmya_console.config import Settings
+
+    bmya_auth.invalidate_registry_cache()
+    registry = tmp_path / "bmya-api-keys.json"
+    registry.write_text(json.dumps({"version": 1, "grants": []}), encoding="utf-8")
+
+    monkeypatch.setattr(bmya_auth, "BMYA_API_KEYS_FILE", str(registry))
+    monkeypatch.setattr(bmya_auth, "BMYA_AUTH_ENABLED", True)
+    monkeypatch.setattr(bmya_auth, "BMYA_KEYS_BACKEND", "file")
+    monkeypatch.setattr(bmya_auth, "BMYA_REGISTRY_TTL", 0.0)
+    monkeypatch.setattr(bmya_auth, "BMYA_ALLOWED_URL_SUFFIXES", (".bmya.cloud",))
+    monkeypatch.setattr(bmya_auth, "BMYA_ALLOW_INSECURE_URLS", False)
+
+    settings = Settings(
+        registry_file=str(registry),
+        meta_file=str(tmp_path / "bmya-console-meta.json"),
+        session_secret=CONSOLE_SESSION_SECRET,
+        mcp_server_url="https://mcp.bmya.cloud/mcp/",
+        mcp_readyz_url="",  # not polled in tests unless a test sets it
+        operators={CONSOLE_OPERATOR: bmya_auth.hash_key(CONSOLE_KEY)},
+        probe_enabled=True,
+    )
+    yield settings
+    bmya_auth.invalidate_registry_cache()
+
+
+@pytest.fixture
+def console_client(console_settings):
+    """An unauthenticated TestClient over the console app."""
+    from starlette.testclient import TestClient
+
+    from bmya_console.app import build_console_app
+
+    return TestClient(build_console_app(console_settings))
+
+
+@pytest.fixture
+def logged_in_client(console_client):
+    """A client that has completed a real login.
+
+    Deliberately logs in through the actual form rather than forging a cookie or
+    adding a test-only bypass env var: a bypass in production code is exactly
+    the kind of thing that ships.
+    """
+    response = console_client.post("/login", data={"email": CONSOLE_OPERATOR, "key": CONSOLE_KEY})
+    assert response.status_code == 200, "login fixture failed"
+    return console_client
+
+
+def csrf_from(client, path="/grants/new") -> str:
+    """Pull the session's CSRF token out of a rendered form."""
+    text = client.get(path).text
+    return text.split('name="csrf_token" value="')[1].split('"')[0]
+
+
+GRANT_FORM = {
+    "odoo_url": "https://clientex.bmya.cloud",
+    "database": "clientex_prod",
+    "mode": "readonly",
+    "label": "ClienteX lectura",
+    "client_name": "clientex",
+    "methods_mode": "inherit",
+    "models_mode": "unrestricted",
+    "denied_models": "",
+    "expires_at": "",
+    "notes": "",
+}

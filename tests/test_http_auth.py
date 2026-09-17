@@ -153,9 +153,7 @@ class TestEndpointPaths:
     @pytest.mark.parametrize("path", ["/mcp", "/mcp/"])
     def test_both_forms_are_authenticated(self, client, path):
         """The bare path must not become an unauthenticated back door."""
-        response = client.post(
-            path, json=INITIALIZE, headers=MCP_HEADERS, follow_redirects=False
-        )
+        response = client.post(path, json=INITIALIZE, headers=MCP_HEADERS, follow_redirects=False)
         assert response.status_code == 401
 
     def test_custom_mcp_http_path_serves_both_forms(self, client_factory, monkeypatch):

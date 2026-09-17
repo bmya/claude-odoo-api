@@ -1,3 +1,17 @@
+# Política de URL compartida por los dos servicios.
+#
+# validate_odoo_url() lee estas dos variables como constantes de módulo, en
+# tiempo de import. Si difieren entre el servidor y la consola, la consola emite
+# keys que el servidor después rechaza -- una key muerta, sin ruido -- o rechaza
+# keys que el servidor sí aceptaría. El ancla hace imposible esa deriva.
+#
+# Ojo con la diferencia deliberada entre "${VAR-default}" y "${VAR:-default}":
+# la primera usa el default sólo si la variable está AUSENTE, la segunda también
+# si está vacía. Ver el comentario extenso en el servicio odoo-api.
+x-bmya-url-policy: &bmya-url-policy
+  BMYA_ALLOWED_URL_SUFFIXES: "${BMYA_ALLOWED_URL_SUFFIXES-.bmya.cloud,.bmya.cl}"
+  BMYA_ALLOW_INSECURE_URLS: "${BMYA_ALLOW_INSECURE_URLS:-}"
+
 services:
   odoo-api:
     image: ${MCP_IMAGE:-ghcr.io/bmya/odoo-mcp-server:latest}
@@ -9,15 +23,17 @@ services:
       - "${MCP_BIND_ADDR:-10.0.0.14}:${MCP_HTTP_PORT:-8080}:8080"
     volumes:
       - "${BMYA_KEYS_HOST_DIR:-./config}:/app/config:ro"
+      # Bitácora de uso. Es el único path escribible del servidor: el resto del
+      # filesystem sigue read_only, y el montaje de config sigue :ro.
+      - "bmya-usage:/app/var/usage"
     environment:
+      <<: *bmya-url-policy
       MCP_TRANSPORT: http
       MCP_HTTP_HOST: 0.0.0.0
       MCP_HTTP_PORT: "8080"
       BMYA_AUTH_ENABLED: "${BMYA_AUTH_ENABLED:-1}"
       BMYA_API_KEYS_FILE: /app/config/bmya-api-keys.json
       BMYA_REGISTRY_TTL_SECONDS: "${BMYA_REGISTRY_TTL_SECONDS:-10}"
-      BMYA_ALLOWED_URL_SUFFIXES: "${BMYA_ALLOWED_URL_SUFFIXES-.bmya.cloud,.bmya.cl}"
-      BMYA_ALLOW_INSECURE_URLS: "${BMYA_ALLOW_INSECURE_URLS:-}"
       MCP_FORWARDED_ALLOW_IPS: "${TRAEFIK_HOST_IP:-127.0.0.1}"
       MCP_GATEWAY_TOKEN: "${MCP_GATEWAY_TOKEN:-}"
       ODOO_MCP_READONLY: "${ODOO_MCP_READONLY:-1}"
@@ -28,6 +44,7 @@ services:
       # Add this line yourself with a real value only if you want to restrict
       # the built-in defaults (calendar.event.action_sync_timesheets,
       # account.move.action_post, sale.order.action_confirm).
+      BMYA_USAGE_DIR: /app/var/usage
       ODOO_REQUEST_TIMEOUT: "30"
       ODOO_MAX_RETRIES: "3"
     read_only: true
@@ -43,3 +60,66 @@ services:
         max-size: "10m"
         max-file: "5"
     restart: unless-stopped
+
+  bmya-console:
+    image: ${CONSOLE_IMAGE:-ghcr.io/bmya/bmya-console:latest}
+    build:
+      context: ..
+      dockerfile: Dockerfile.console
+    container_name: bmya-console
+    ports:
+      # Sólo la IP de VLAN, igual que odoo-api. Nunca 0.0.0.0: BARBOL no tiene
+      # firewall, y lo único que la mantiene cerrada es que ningún servicio
+      # bindee una dirección pública.
+      - "${MCP_BIND_ADDR:-10.0.0.14}:${BMYA_CONSOLE_HTTP_PORT:-8081}:8081"
+    volumes:
+      # El MISMO directorio del host que odoo-api, pero :rw. Un directorio,
+      # nunca el archivo: un bind mount de archivo fija el inodo, y la
+      # reescritura atómica crea uno nuevo -- el contenedor se quedaría leyendo
+      # el viejo para siempre y ninguna revocación tomaría efecto.
+      - "${BMYA_KEYS_HOST_DIR:-./config}:/app/config:rw"
+      # La bitácora se lee, no se escribe, desde acá.
+      - "bmya-usage:/app/var/usage:ro"
+    user: "1000:1000"
+    environment:
+      <<: *bmya-url-policy
+      BMYA_API_KEYS_FILE: /app/config/bmya-api-keys.json
+      BMYA_KEYS_BACKEND: file
+      BMYA_CONSOLE_META_FILE: /app/config/bmya-console-meta.json
+      BMYA_CONSOLE_USAGE_DIR: /app/var/usage
+      BMYA_CONSOLE_HTTP_HOST: 0.0.0.0
+      BMYA_CONSOLE_HTTP_PORT: "8081"
+      # Obligatorios: sin ellos la app no arranca (secreto) o no deja entrar a
+      # nadie (operadores). Van en deploy/.env, que está en .gitignore, o en las
+      # variables del stack de Portainer -- nunca inline en un archivo versionado.
+      BMYA_CONSOLE_SESSION_SECRET: "${BMYA_CONSOLE_SESSION_SECRET}"
+      BMYA_CONSOLE_OPERATORS: "${BMYA_CONSOLE_OPERATORS}"
+      # 0 mientras sea sólo VLAN por HTTP plano: una cookie Secure no viaja sin
+      # TLS, así que la sesión se setea y no vuelve nunca -- loop de login. Se
+      # pone en 1 el día que Traefik la sirva, sin tocar código.
+      BMYA_CONSOLE_COOKIE_SECURE: "${BMYA_CONSOLE_COOKIE_SECURE:-0}"
+      BMYA_CONSOLE_READ_ONLY: "${BMYA_CONSOLE_READ_ONLY:-0}"
+      BMYA_CONSOLE_MCP_READYZ_URL: "http://${MCP_BIND_ADDR:-10.0.0.14}:${MCP_HTTP_PORT:-8080}/readyz"
+      BMYA_MCP_SERVER_URL: "${BMYA_MCP_SERVER_URL}"
+      BMYA_REGISTRY_TTL_SECONDS: "${BMYA_REGISTRY_TTL_SECONDS:-10}"
+      # Deliberadamente NO declarada, igual que en odoo-api: un string vacío
+      # inyectado significa "ningún método", no "usá los defaults".
+      #   ODOO_MCP_ALLOWED_METHODS
+    # El filesystem raíz del contenedor. El bind mount :rw de arriba no se ve
+    # afectado: los montajes llevan su propio flag.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    restart: unless-stopped
+
+volumes:
+  bmya-usage:

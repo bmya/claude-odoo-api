@@ -132,22 +132,22 @@ def _preserve_ownership(tmp: str, uid: int, gid: int, path: str) -> None:
         )
 
 
-def write_raw(path: str, data: dict) -> None:
-    """Write the registry atomically, keeping a .bak of the previous content.
+def write_raw_json(path: str, data: dict, *, backup: bool = True) -> None:
+    """Atomically replace a JSON file, preserving its ownership and mode.
 
-    Atomic in isolation, but **not** a substitute for :func:`mutate_registry`:
-    the ``.bak`` copy happens here, before the write, so two racing read-modify
-    -write cycles clobber the backup as well as losing a grant. Call this
-    directly only when you already hold the lock, or when there is provably no
-    second writer (tests, first creation).
+    The generic half of :func:`write_raw`: tempfile + fsync + ``os.replace``,
+    ``chmod 600``, and the uid/gid the file already had. No printing, no
+    registry-specific notes -- so the console's meta store can reuse exactly the
+    same durability and ownership guarantees without inheriting operator
+    guidance aimed at someone sitting at a terminal.
     """
-    data["updated_at"] = now_iso()
     directory = os.path.dirname(os.path.abspath(path)) or "."
 
     previous_owner = None
     if os.path.exists(path):
         previous_owner = _owner_of(path)
-        shutil.copy2(path, f"{path}.bak")
+        if backup:
+            shutil.copy2(path, f"{path}.bak")
 
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".bmya-keys-", suffix=".json")
     try:
@@ -164,6 +164,20 @@ def write_raw(path: str, data: dict) -> None:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+    return previous_owner
+
+
+def write_raw(path: str, data: dict) -> None:
+    """Write the registry atomically, keeping a .bak of the previous content.
+
+    Atomic in isolation, but **not** a substitute for :func:`mutate_registry`:
+    the ``.bak`` copy happens here, before the write, so two racing read-modify
+    -write cycles clobber the backup as well as losing a grant. Call this
+    directly only when you already hold the lock, or when there is provably no
+    second writer (tests, first creation).
+    """
+    data["updated_at"] = now_iso()
+    previous_owner = write_raw_json(path, data)
     print(f"Wrote {path} (previous copy at {path}.bak)", file=sys.stderr)
 
     if previous_owner is None:

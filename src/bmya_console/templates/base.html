@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>{% block title %}Consola MCP · BMYA{% endblock %}</title>
+<link rel="stylesheet" href="/static/console.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/grants">Consola MCP <span>BMYA</span></a>
+  {% if identity %}
+  <nav>
+    <a href="/grants">Keys</a>
+    <a href="/grants/new">Emitir</a>
+    <a href="/usage">Uso</a>
+    <span class="who">{{ identity.email }}</span>
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button type="submit" class="linkish">Salir</button>
+    </form>
+  </nav>
+  {% endif %}
+</header>
+
+{% if settings and settings.read_only %}
+<p class="banner warn">Consola en modo sólo lectura (<code>BMYA_CONSOLE_READ_ONLY=1</code>): no se puede emitir ni revocar.</p>
+{% endif %}
+
+<main>
+{% block content %}{% endblock %}
+</main>
+
+<footer>
+  <span>Registro: <code>{{ settings.registry_file }}</code></span>
+  <span>Los cambios toman efecto en ≤ {{ settings.registry_ttl_seconds }} s.</span>
+</footer>
+</body>
+</html>

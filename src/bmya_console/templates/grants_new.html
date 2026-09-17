@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Emitir key · Consola MCP{% endblock %}
+{% block content %}
+<h1>Emitir una key</h1>
+
+{% if errors %}
+<div class="card">
+  <p class="error"><strong>No se emitió nada.</strong></p>
+  <ul>{% for e in errors %}<li class="error">{{ e }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<form method="post" action="/grants" class="card">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+
+  <label>URL de Odoo
+    <input type="text" name="odoo_url" required placeholder="https://cliente.bmya.cloud"
+           value="{{ form.odoo_url or '' }}">
+  </label>
+
+  <label>Base de datos
+    <input type="text" name="database" required placeholder="cliente_prod"
+           value="{{ form.database or '' }}">
+    <span class="hint">
+      Exacta y actual. En Odoo.sh el nombre lleva un sufijo de build que cambia en cada
+      reconstrucción; con uno viejo, todas las llamadas fallan con
+      <code>404 "No database is selected"</code>.
+    </span>
+  </label>
+
+  <fieldset>
+    <legend>Modo</legend>
+    <label class="choice"><input type="radio" name="mode" value="readonly" {% if form.mode != 'readwrite' %}checked{% endif %}>
+      <span><strong>Sólo lectura</strong><span class="hint">Las tools de escritura ni siquiera se le listan al cliente.</span></span></label>
+    <label class="choice"><input type="radio" name="mode" value="readwrite" {% if form.mode == 'readwrite' %}checked{% endif %}>
+      <span><strong>Lectura y escritura</strong><span class="hint">Habilita create, write, unlink y call_method.</span></span></label>
+  </fieldset>
+
+  <label>Etiqueta
+    <input type="text" name="label" placeholder="ClienteX lectura" value="{{ form.label or '' }}">
+  </label>
+
+  <label>Nombre para el snippet
+    <input type="text" name="client_name" placeholder="clientex" value="{{ form.client_name or '' }}">
+    <span class="hint">Sólo cosmético: es el nombre del servidor MCP en la configuración del cliente.</span>
+  </label>
+
+  <fieldset>
+    <legend>Métodos de negocio (<code>odoo_call_method</code>)</legend>
+    <label class="choice"><input type="radio" name="methods_mode" value="inherit" {% if form.methods_mode != 'none' and form.methods_mode != 'list' %}checked{% endif %}>
+      <span><strong>Hereda la lista del servidor</strong>
+      <span class="hint">Se guarda <code>null</code>. Hoy el servidor permite:
+        {% for m in server_methods %}<code>{{ m }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</span></span></label>
+    <label class="choice"><input type="radio" name="methods_mode" value="none" {% if form.methods_mode == 'none' %}checked{% endif %}>
+      <span><strong>Ningún método</strong>
+      <span class="hint">Se guarda <code>[]</code>. <code>odoo_call_method</code> queda deshabilitado por completo. No es lo mismo que heredar.</span></span></label>
+    <label class="choice"><input type="radio" name="methods_mode" value="list" {% if form.methods_mode == 'list' %}checked{% endif %}>
+      <span><strong>Sólo estos</strong>
+      <span class="hint">Uno por línea, formato <code>modelo.metodo</code>. Sólo puede restringir: se intersecta con la lista del servidor.</span></span></label>
+    <textarea name="methods_list" placeholder="account.move.action_post">{{ form.methods_list or '' }}</textarea>
+  </fieldset>
+
+  <fieldset>
+    <legend>Modelos alcanzables</legend>
+    <label class="choice"><input type="radio" name="models_mode" value="unrestricted" {% if form.models_mode != 'list' %}checked{% endif %}>
+      <span><strong>Sin restricción</strong><span class="hint">Se guarda <code>null</code>.</span></span></label>
+    <label class="choice"><input type="radio" name="models_mode" value="list" {% if form.models_mode == 'list' %}checked{% endif %}>
+      <span><strong>Sólo estos</strong><span class="hint">Uno por línea.</span></span></label>
+    <textarea name="models_list" placeholder="res.partner">{{ form.models_list or '' }}</textarea>
+  </fieldset>
+
+  <label>Modelos denegados
+    <textarea name="denied_models" placeholder="res.users&#10;ir.config_parameter&#10;ir.mail_server">{{ form.denied_models or '' }}</textarea>
+    <span class="hint">
+      Se aplica último y gana siempre, incluso sobre la lista de permitidos. Alcanza también a la
+      introspección: denegar <code>res.users</code> esconde además sus campos.
+    </span>
+  </label>
+
+  <label>Expira
+    <input type="date" name="expires_at" value="{{ form.expires_at or '' }}">
+    <span class="hint">Vacío = sin vencimiento. Se guarda como 23:59:59 UTC de ese día.</span>
+  </label>
+
+  <label>Notas
+    <textarea name="notes" placeholder="contacto: juan@clientex.cl">{{ form.notes or '' }}</textarea>
+  </label>
+
+  <button type="submit">Emitir key</button>
+  <a href="/grants" class="muted" style="margin-left:1rem">Cancelar</a>
+</form>
+{% endblock %}

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Ingresar · Consola MCP{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <h1>Consola MCP</h1>
+  <p class="muted">Emisión y revocación de keys de acceso a Odoo.</p>
+
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+  {% if not settings.auth_ready %}
+    <p class="error">
+      No hay operadores configurados (<code>BMYA_CONSOLE_OPERATORS</code> está vacío),
+      así que nadie puede ingresar. Es a propósito: vacío significa cerrado, nunca abierto.
+    </p>
+  {% endif %}
+
+  <form method="post" action="/login">
+    <label>Correo
+      <input type="email" name="email" autocomplete="username" required autofocus>
+    </label>
+    <label>Clave de consola
+      <input type="password" name="key" autocomplete="current-password" required>
+    </label>
+    <button type="submit">Ingresar</button>
+  </form>
+</div>
+{% endblock %}

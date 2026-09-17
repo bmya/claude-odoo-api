@@ -634,3 +634,30 @@ class TestGrantExpiry:
         moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
         grant = _grant(expires_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
         assert grant.is_expired(now=moment) is True
+
+
+class TestCreditsHook:
+    """check_credit is a no-op placeholder, and the tests pin both halves of
+    that: it must not interfere today, and it must raise something call_tool
+    already knows how to surface when it does start charging."""
+
+    def test_disabled_is_a_pass_through(self, monkeypatch):
+        monkeypatch.setattr(bmya_auth, "BMYA_CREDITS_ENABLED", False)
+        grant = bmya_auth.Grant(
+            key_id="aaa111",
+            key_sha256="0" * 64,
+            odoo_url="https://clientex.bmya.cloud",
+            database="clientex_prod",
+            mode=bmya_auth.MODE_RO,
+        )
+        assert bmya_auth.check_credit(grant, "odoo_read") is None
+
+    def test_exhaustion_is_a_tool_denied(self):
+        """A subclass on purpose: call_tool already catches ToolDenied, audits
+        it as denied and shows its message to the caller verbatim. An HTTP 402
+        would instead read as a transport failure and kill the MCP session."""
+        assert issubclass(bmya_auth.CreditsExhausted, bmya_auth.ToolDenied)
+
+    def test_the_flag_defaults_off(self, monkeypatch):
+        monkeypatch.delenv("BMYA_CREDITS_ENABLED", raising=False)
+        assert bmya_auth._env_flag("BMYA_CREDITS_ENABLED") is False

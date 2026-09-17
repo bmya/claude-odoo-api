@@ -850,8 +850,80 @@ async def list_tools() -> list[Tool]:
     return tools
 
 
+def _count_rows(contents) -> Optional[int]:
+    """How many records a tool call returned, when that is knowable.
+
+    The read tools answer with ``json.dumps(result)``, so a list result is
+    countable without touching any of the twelve tool branches. Anything else
+    (a "Created record with ID: 42" string, a dict from fields_get) yields None
+    rather than a made-up number.
+
+    Recorded, never billed: the caller picks ``limit``, so pricing per row would
+    punish one efficient query over twenty small ones -- exactly backwards.
+    """
+    try:
+        if len(contents) != 1:
+            return None
+        parsed = json.loads(contents[0].text)
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return None
+    return len(parsed) if isinstance(parsed, list) else None
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
+    """Time and meter one tool call, then hand it to the real handler.
+
+    A wrapper rather than instrumentation inside _dispatch_tool: that function
+    has a dozen branches and as many returns, and threading a timer through all
+    of them would be a lot of edits for one measurement.
+
+    The grant is re-resolved here instead of being passed out of the handler.
+    That is the same trade the auth middleware already makes and documents: a
+    strip, a sha256, a dict lookup and a compare_digest, so the duplication is
+    free and neither layer has to reach into the other's internals.
+    """
+    started = time.time()
+    contents = None
+    err_class = ""
+    try:
+        contents = await _dispatch_tool(name, arguments)
+        return contents
+    except BaseException as exc:
+        err_class = type(exc).__name__
+        raise
+    finally:
+        grant = None
+        mode = None
+        try:
+            headers = _request_headers()
+            if headers is not None and bmya.BMYA_AUTH_ENABLED:
+                grant = bmya.resolve_grant(headers)
+                mode = bmya.effective_mode(
+                    grant,
+                    server_readonly=READ_ONLY,
+                    requested=headers.get(bmya.HEADER_MODE),
+                )
+        except Exception:  # noqa: BLE001 - an unauthenticated call is still worth counting
+            grant = None
+
+        text = contents[0].text if contents else ""
+        # _dispatch_tool returns refusals as text rather than raising, so "ok"
+        # has to read the same prefix the caller sees.
+        ok = bool(contents) and not text.startswith("Error:")
+        bmya.record_usage(
+            grant=grant,
+            tool=name,
+            mode=mode,
+            decision="allowed" if ok else "refused",
+            ok=ok,
+            rows=_count_rows(contents) if ok else None,
+            ms=(time.time() - started) * 1000,
+            err_class=err_class,
+        )
+
+
+async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
     """Handle tool calls"""
     grant = None
     mode = None
@@ -884,6 +956,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 mode=mode,
                 server_allowed_methods=ODOO_ALLOWED_METHODS,
             )
+            # No-op until a credits backend exists. Here, right after
+            # authorization and before any Odoo work, because that is the point
+            # where the tenant is resolved and nothing has been spent yet.
+            bmya.check_credit(grant, name)
         elif READ_ONLY and name in bmya.WRITE_TOOLS:
             # Server-level kill-switch for the stdio / auth-disabled paths.
             return [TextContent(

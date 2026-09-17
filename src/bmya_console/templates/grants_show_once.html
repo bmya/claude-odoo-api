@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Key emitida · Consola MCP{% endblock %}
+{% block content %}
+<h1>Key emitida</h1>
+
+<div class="card">
+  <p class="banner warn" style="margin:0 0 1rem">
+    <strong>Se muestra una sola vez.</strong> El registro guarda sólo su sha256:
+    no se puede recuperar ni volver a ver. Si se pierde, se revoca y se emite otra.
+    No hay ninguna URL que la muestre de nuevo — copiala ahora.
+  </p>
+
+  <label>Key
+    <textarea class="secret mono" readonly onclick="this.select()">{{ plaintext }}</textarea>
+  </label>
+
+  <table>
+    <tr><th>key_id</th><td><code>{{ entry.key_id }}</code></td></tr>
+    <tr><th>Base</th><td><code>{{ entry.database }}</code></td></tr>
+    <tr><th>URL</th><td><code>{{ entry.odoo_url }}</code></td></tr>
+    <tr><th>Modo</th><td>{{ entry.mode }}</td></tr>
+    <tr><th>Expira</th><td>{{ entry.expires_at or "sin vencimiento" }}</td></tr>
+    <tr><th>Métodos</th><td>
+      {% if entry.allowed_methods is none %}hereda la lista del servidor (<code>null</code>)
+      {% elif not entry.allowed_methods %}ninguno (<code>[]</code>)
+      {% else %}{{ entry.allowed_methods|join(", ") }}{% endif %}</td></tr>
+    <tr><th>Modelos denegados</th><td>{{ entry.denied_models|join(", ") or "—" }}</td></tr>
+  </table>
+
+  {% if method_warnings %}
+  <p class="banner warn">
+    Estos métodos no están en la lista del servidor, así que la intersección los va a eliminar
+    y no van a hacer nada: {% for m in method_warnings %}<code>{{ m }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
+  </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Mensaje para el cliente</h2>
+  {% if snippets %}
+    <p class="muted">Copiá este bloque tal cual a un correo o mensaje. Ya lleva la key puesta.</p>
+    <textarea class="secret mono" readonly rows="28" onclick="this.select()">{{ snippets }}</textarea>
+  {% else %}
+    <p class="error">
+      No está configurado <code>BMYA_MCP_SERVER_URL</code>, así que no puedo armar el bloque
+      de onboarding. La key de arriba es válida igual.
+    </p>
+  {% endif %}
+</div>
+
+<p><a href="/grants">Volver al listado</a> · <a href="/grants/{{ entry.key_id }}">Ver esta key</a></p>
+{% endblock %}

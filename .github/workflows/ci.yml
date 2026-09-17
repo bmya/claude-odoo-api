@@ -26,14 +26,14 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'requirements-dev.txt') }}
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'requirements-dev.txt', 'requirements-console.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt -r requirements-dev.txt
+        pip install -r requirements.txt -r requirements-dev.txt -r requirements-console.txt
 
     - name: Run tests with coverage
       run: |
@@ -69,9 +69,13 @@ jobs:
       run: |
         black --check --line-length 100 \
           src/bmya_auth.py src/bmya_registry.py src/bmya_snippets.py \
-          tools/bmya-keys.py \
+          src/bmya_console/ \
+          tools/bmya-keys.py tools/bmya-console-operator.py \
           tests/conftest.py tests/test_bmya_auth.py tests/test_http_auth.py \
-          tests/test_bmya_keys_cli.py tests/test_bmya_registry.py
+          tests/test_bmya_keys_cli.py tests/test_bmya_registry.py \
+          tests/test_console_auth.py tests/test_console_grants.py \
+          tests/test_console_meta.py tests/test_console_probe.py \
+          tests/test_usage_metering.py
 
     - name: Check code formatting with black (legacy, advisory)
       run: |
@@ -110,3 +114,17 @@ jobs:
     - name: Test Docker image
       run: |
         docker run --rm odoo-mcp-server:test python -c "import sys; print(f'Python {sys.version}')"
+
+    - name: Build console image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile.console
+        push: false
+        tags: bmya-console:test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Test console image
+      run: |
+        docker run --rm bmya-console:test python -c "import bmya_console, bmya_registry; print('console imports ok')"

@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}{{ grant.key_id }} · Consola MCP{% endblock %}
+{% block content %}
+<h1><code>{{ grant.key_id }}</code> <span class="pill {{ status.split(' ')[0] }}">{{ status }}</span></h1>
+
+<div class="card">
+  <table>
+    <tr><th>URL</th><td><code>{{ grant.odoo_url }}</code></td></tr>
+    <tr><th>Base</th><td><code>{{ grant.database }}</code></td></tr>
+    <tr><th>Modo</th><td>{{ grant.mode }}</td></tr>
+    <tr><th>Etiqueta</th><td>{{ grant.label or "—" }}</td></tr>
+    <tr><th>Creada</th><td>{{ grant.created_at or "—" }}</td></tr>
+    <tr><th>Emitida por</th><td>{{ meta.created_by or "—" }}</td></tr>
+    <tr><th>Expira</th><td>{{ grant.expires_at or "sin vencimiento" }}</td></tr>
+    <tr><th>Revocada</th><td>{{ "sí, " ~ grant.revoked_at if grant.revoked else "no" }}</td></tr>
+    <tr><th>Métodos</th><td>
+      {% if grant.allowed_methods is none %}hereda la lista del servidor (<code>null</code>)
+      {% elif not grant.allowed_methods %}ninguno (<code>[]</code>)
+      {% else %}{{ grant.allowed_methods|join(", ") }}{% endif %}</td></tr>
+    <tr><th>Modelos permitidos</th><td>
+      {% if grant.allowed_models is none %}sin restricción{% else %}{{ grant.allowed_models|join(", ") }}{% endif %}</td></tr>
+    <tr><th>Modelos denegados</th><td>{{ grant.denied_models|join(", ") or "—" }}</td></tr>
+    <tr><th>Notas</th><td>{{ grant.notes or "—" }}</td></tr>
+  </table>
+
+  {% if method_warnings %}
+  <p class="banner warn">Métodos que la lista del servidor descarta:
+    {% for m in method_warnings %}<code>{{ m }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+  {% endif %}
+</div>
+
+{% if meta.history %}
+<div class="card">
+  <h2>Historial</h2>
+  <table>
+    <tr><th>Cuándo</th><th>Quién</th><th>Qué</th></tr>
+    {% for h in meta.history %}<tr><td>{{ h.at }}</td><td>{{ h.actor }}</td><td>{{ h.action }}</td></tr>{% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if not settings.read_only %}
+<div class="card">
+  <h2>Editar</h2>
+  <p class="muted">
+    La URL, la base y el modo no se editan: cambiarlos reapunta una credencial que el cliente ya
+    tiene, y pasar de lectura a escritura escalaría en silencio una key ya instalada.
+    Para eso, revocá y emití una nueva.
+  </p>
+  <form method="post" action="/grants/{{ grant.key_id }}/edit">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Etiqueta<input type="text" name="label" value="{{ grant.label or '' }}"></label>
+    <label>Expira<input type="date" name="expires_at" value="{{ (grant.expires_at or '')[:10] }}"></label>
+    <label>Notas<textarea name="notes">{{ grant.notes or '' }}</textarea></label>
+    <button type="submit" class="secondary">Guardar</button>
+  </form>
+</div>
+
+{% if not grant.revoked %}
+<div class="card">
+  <h2>Revocar</h2>
+  <p class="muted">
+    La entrada no se borra: queda marcada como revocada, que es el registro de auditoría.
+    Deja de funcionar en ≤ {{ settings.registry_ttl_seconds }} s, sin reiniciar nada.
+  </p>
+  <form method="post" action="/grants/{{ grant.key_id }}/revoke"
+        onsubmit="return confirm('Revocar {{ grant.key_id }}? El cliente pierde el acceso en segundos.')">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button type="submit" class="danger">Revocar esta key</button>
+  </form>
+</div>
+{% endif %}
+{% endif %}
+
+<p><a href="/grants">Volver al listado</a></p>
+{% endblock %}

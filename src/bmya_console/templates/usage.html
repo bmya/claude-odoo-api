@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Uso · Consola MCP{% endblock %}
+{% block content %}
+<h1>Uso</h1>
+<p class="muted">
+  Últimos {{ summary.days }} días · {{ summary.total }} llamadas, {{ summary.refused }} rechazadas.
+  <a href="/usage?days=7">7 días</a> ·
+  <a href="/usage?days=30">30</a> ·
+  <a href="/usage?days=90">90</a>
+</p>
+
+{% if not summary.total %}
+<div class="card">
+  <p class="muted">
+    No hay registros todavía. El servidor MCP escribe la bitácora sólo si tiene
+    <code>BMYA_USAGE_DIR</code> configurado y el volumen montado.
+  </p>
+</div>
+{% else %}
+
+<div class="card">
+  <h2>Por key</h2>
+  <table>
+    <tr><th>key_id</th><th>Etiqueta</th><th>Base</th><th>Llamadas</th><th>Rechazadas</th><th>Filas</th><th>ms prom.</th><th>Última</th></tr>
+    {% for row in summary.by_key %}
+    <tr>
+      <td><a href="/grants/{{ row.key_id }}"><code>{{ row.key_id }}</code></a></td>
+      <td>{{ labels.get(row.key_id) or "—" }}</td>
+      <td><code>{{ row.database or "—" }}</code></td>
+      <td>{{ row.calls }}</td>
+      <td>{% if row.refused %}<span class="error">{{ row.refused }}</span>{% else %}0{% endif %}</td>
+      <td>{{ row.rows }}</td>
+      <td>{{ row.avg_ms }}</td>
+      <td>{{ (row.last_seen or "—")[:19] }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="hint" style="margin-left:0">
+    Las filas se registran pero no se cobran: el cliente elige el <code>limit</code>, así que
+    tarifar por fila castigaría una consulta eficiente frente a veinte chicas.
+  </p>
+</div>
+
+<div class="card">
+  <h2>Por tool</h2>
+  <table>
+    <tr><th>Tool</th><th>Llamadas</th></tr>
+    {% for tool, count in summary.by_tool %}
+    <tr><td><code>{{ tool }}</code></td><td>{{ count }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <h2>Por día</h2>
+  <table>
+    <tr><th>Día</th><th>Llamadas</th></tr>
+    {% for day, count in summary.by_day %}
+    <tr><td>{{ day }}</td><td>{{ count }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{% endblock %}
