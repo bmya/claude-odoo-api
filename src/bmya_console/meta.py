@@ -77,6 +77,49 @@ def history_entry(actor: str, action: str, detail: str = "") -> dict:
     return entry
 
 
+# --- Invitations: the shape only. No routes, no token minting, nothing enabled.
+#
+# Recorded here now so that switching the feature on is not a schema change, and
+# so the decisions behind it are not re-litigated from scratch later.
+#
+#   {"id": "...", "created_by": "...", "created_at": "...", "expires_at": "...",
+#    "token_sha256": "...", "consumed_at": null, "consumed_key_id": null,
+#    "odoo_login": "...", "provisioning_status": "pending|provisioned",
+#    "template": {"odoo_url": ..., "database": ..., "mode": "readonly",
+#                 "denied_models": [...], "sandbox": true}}
+#
+# Decisions worth keeping:
+#
+# * ``token_sha256`` only, same discipline as the registry: shown once, never
+#   stored. The recipient is external and never authenticates any other way, so
+#   the invitation token is the ONLY credential on that path -- which is why it
+#   must be high-entropy, short-lived and single-use.
+# * **Single-use, always.** A multi-use invitation saves the inviter one click
+#   and costs the ability to say who redeemed what. For an outsider touching a
+#   client's data that trade is not close.
+# * Two short, independent clocks: 7 days to redeem, and the resulting grant
+#   expires 14 days after redemption, never renewable in place.
+# * ``odoo_url`` and ``database`` are NOT inputs to the redeem endpoint -- they
+#   are read from ``template``. That is the real control that stops an invited
+#   tester pointing a key at another client's Odoo. Do not "simplify" it into a
+#   form field.
+# * ``BMYA_ALLOWED_URL_SUFFIXES`` is NOT that control and must not be relied on
+#   for it: production already carries ``.odoo.com``, which admits every Odoo
+#   Online database in existence. It is an anti-SSRF backstop, not a tenant
+#   boundary. Invitations need an EXACT (url, database) allowlist.
+# * ``odoo_login`` / ``provisioning_status`` exist because an invitee needs an
+#   Odoo user with an API key on the sandbox database or the minted key is inert
+#   (resolve_odoo_client raises "Missing X-Odoo-Api-Key"). Without tracking it,
+#   every invitation turns into a support conversation.
+# * When the routes exist they must 404 while disabled, not 403: a 403 confirms
+#   the feature is there.
+#
+# Residual risk, stated plainly: an invited tester with a readonly sandbox key
+# and their own Odoo user reads whatever that Odoo user can read. The isolation
+# is the sandbox database's, not the MCP server's. MCP narrows; it does not
+# create a boundary Odoo does not already have.
+
+
 class MetaStore(Protocol):
     """The seam. One Protocol, one implementation, one factory.
 
