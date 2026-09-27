@@ -58,20 +58,28 @@ def read_records(usage_dir: str, days: int = 30):
             logger.warning("Could not read usage journal %s: %s", path, exc)
 
 
-def summarize(usage_dir: str, days: int = 30) -> dict:
-    """Roll the journal up per key and per day.
+def summarize(usage_dir: str, days: int = 30, database: str = "") -> dict:
+    """Roll the journal up per key and per day, optionally for one database.
 
     ``calls`` counts every attempt; ``refused`` counts the ones that came back
     as an error to the client. Both matter: a key that is mostly refusals is a
     misconfigured client, and that is worth seeing before a customer reports it.
+
+    ``databases`` lists every database seen in the window *before* filtering, so
+    the filter can offer them all even while one is selected.
     """
     by_key = {}
     by_day = {}
     by_tool = {}
+    databases = set()
     total = 0
     refused = 0
 
     for record in read_records(usage_dir, days):
+        if record.get("database"):
+            databases.add(record["database"])
+        if database and record.get("database") != database:
+            continue
         total += 1
         key_id = record.get("key_id") or "—"
         day = record.get("day")
@@ -109,6 +117,8 @@ def summarize(usage_dir: str, days: int = 30) -> dict:
         "total": total,
         "refused": refused,
         "days": days,
+        "database": database,
+        "databases": sorted(databases),
         "by_key": sorted(by_key.values(), key=lambda e: e["calls"], reverse=True),
         "by_day": sorted(by_day.items()),
         "by_tool": sorted(by_tool.items(), key=lambda kv: kv[1], reverse=True),

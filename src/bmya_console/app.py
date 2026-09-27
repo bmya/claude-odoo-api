@@ -523,7 +523,7 @@ def build_console_app(settings: Settings = None) -> FastAPI:
     # --- Usage
 
     @app.get("/usage", response_class=HTMLResponse, include_in_schema=False)
-    def usage_view(request: Request, days: int = 30):
+    def usage_view(request: Request, days: int = 30, database: str = ""):
         """What each key actually did.
 
         Read-only over the journal the MCP server appends to. It bills nothing:
@@ -535,7 +535,7 @@ def build_console_app(settings: Settings = None) -> FastAPI:
             return redirect
 
         days = max(1, min(int(days or 30), 365))
-        summary = usage.summarize(settings.usage_dir, days=days)
+        summary = usage.summarize(settings.usage_dir, days=days, database=database.strip())
         labels = {g.get("key_id"): g.get("label") or "" for g in _load_grants()}
         return render(request, "usage.html", summary=summary, labels=labels, days=days)
 

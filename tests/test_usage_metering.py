@@ -197,6 +197,39 @@ class TestSummarize:
         assert top["calls"] == 2 and top["rows"] == 12 and top["avg_ms"] == 75.0
         assert dict(summary["by_tool"])["odoo_search_read"] == 1
 
+    def test_filters_by_database_but_still_lists_them_all(self, tmp_path):
+        directory = tmp_path / "usage"
+        directory.mkdir()
+        today = datetime.now(timezone.utc).date().isoformat()
+        self._write(
+            directory,
+            today,
+            [
+                {"key_id": "aaa111", "database": "db1", "tool": "odoo_read", "ok": True},
+                {"key_id": "aaa111", "database": "db1", "tool": "odoo_read", "ok": False},
+                {"key_id": "bbb222", "database": "db2", "tool": "odoo_write", "ok": True},
+            ],
+        )
+
+        summary = usage.summarize(str(directory), database="db1")
+
+        assert summary["total"] == 2
+        assert summary["refused"] == 1
+        assert [row["key_id"] for row in summary["by_key"]] == ["aaa111"]
+        assert dict(summary["by_tool"]) == {"odoo_read": 2}
+        assert summary["databases"] == ["db1", "db2"]
+        assert summary["database"] == "db1"
+
+    def test_no_filter_is_every_database(self, tmp_path):
+        directory = tmp_path / "usage"
+        directory.mkdir()
+        today = datetime.now(timezone.utc).date().isoformat()
+        self._write(directory, today, [
+            {"key_id": "a", "database": "db1", "tool": "t", "ok": True},
+            {"key_id": "b", "database": "db2", "tool": "t", "ok": True},
+        ])
+        assert usage.summarize(str(directory))["total"] == 2
+
     def test_a_malformed_line_is_skipped(self, tmp_path):
         """The journal is appended to by another process: a truncated last line
         during a read is normal, not exceptional."""
@@ -278,3 +311,36 @@ class TestUsageView:
         response = client.get("/usage")
         assert "aaa111" in response.text
         assert "clientex_prod" in response.text
+
+    def test_the_database_filter_narrows_the_page(self, console_settings, tmp_path):
+        directory = tmp_path / "usage"
+        directory.mkdir()
+        today = datetime.now(timezone.utc).date().isoformat()
+        lines = [
+            {"ts": "2026-09-17T10:00:00", "key_id": "aaa111", "database": "clientex_prod",
+             "tool": "odoo_search_read", "ok": True},
+            {"ts": "2026-09-17T10:01:00", "key_id": "ded582", "database": "odoo18e_apv",
+             "tool": "odoo_search_count", "ok": True},
+        ]
+        (directory / f"{today}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+        from starlette.testclient import TestClient
+
+        from bmya_console.app import build_console_app
+        from tests.conftest import CONSOLE_KEY, CONSOLE_OPERATOR
+
+        settings = type(console_settings)(
+            **{**console_settings.__dict__, "usage_dir": str(directory)}
+        )
+        client = TestClient(build_console_app(settings))
+        client.post("/login", data={"email": CONSOLE_OPERATOR, "key": CONSOLE_KEY})
+
+        page = client.get("/usage", params={"days": 7, "database": "odoo18e_apv"}).text
+
+        assert "ded582" in page
+        assert "aaa111" not in page
+        # Both remain selectable, and the day links keep the filter.
+        assert '<option value="clientex_prod"' in page
+        assert "days=30&amp;database=odoo18e_apv" in page
+
+        empty = client.get("/usage", params={"database": "no_such_db"}).text
+        assert "Sin llamadas para" in empty
