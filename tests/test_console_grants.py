@@ -309,6 +309,59 @@ class TestEdit:
         assert open(console_settings.registry_file, "rb").read() == before
 
 
+class TestOdooLegacyFields:
+    """Odoo 17/18: the grant carries the login JSON-RPC needs for the uid."""
+
+    def test_login_and_api_are_stored_and_the_server_accepts_them(
+        self, logged_in_client, console_settings
+    ):
+        plaintext = shown_key(
+            mint(logged_in_client, odoo_login=" ana@clientex.cl ", odoo_api="jsonrpc")
+        )
+
+        grant = grants_of(console_settings)[0]
+        assert grant["odoo_login"] == "ana@clientex.cl"
+        assert grant["odoo_api"] == "jsonrpc"
+        resolved = bmya_auth.resolve_grant({"x-bmya-api-key": plaintext})
+        assert resolved.odoo_login == "ana@clientex.cl"
+        assert resolved.odoo_api == "jsonrpc"
+
+    def test_defaults_are_auto_and_no_login(self, logged_in_client, console_settings):
+        mint(logged_in_client)
+        grant = grants_of(console_settings)[0]
+        assert grant["odoo_api"] == "auto"
+        assert grant["odoo_login"] == ""
+
+    def test_pinned_json_rpc_without_login_mints_nothing(self, logged_in_client, console_settings):
+        response = mint(logged_in_client, odoo_api="jsonrpc", odoo_login="")
+        assert response.status_code == 400
+        assert "login de Odoo es obligatorio" in response.text
+        assert not grants_of(console_settings)
+
+    def test_an_unknown_api_mints_nothing(self, logged_in_client, console_settings):
+        assert mint(logged_in_client, odoo_api="xmlrpc").status_code == 400
+        assert not grants_of(console_settings)
+
+    def test_the_login_can_be_added_to_an_existing_grant(self, logged_in_client, console_settings):
+        """What APV needs: its grant predates the field."""
+        mint(logged_in_client)
+        key_id = grants_of(console_settings)[0]["key_id"]
+
+        logged_in_client.post(
+            f"/grants/{key_id}/edit",
+            data={
+                "csrf_token": csrf_from(logged_in_client),
+                "label": "APV",
+                "odoo_login": "ana@apv.cl",
+                "odoo_api": "auto",
+            },
+        )
+
+        grant = grants_of(console_settings)[0]
+        assert grant["odoo_login"] == "ana@apv.cl"
+        assert grant["odoo_api"] == "auto"
+
+
 class TestGuards:
     def test_mutations_require_csrf(self, logged_in_client, console_settings):
         before = open(console_settings.registry_file, "rb").read()

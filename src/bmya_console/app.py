@@ -445,6 +445,10 @@ def build_console_app(settings: Settings = None) -> FastAPI:
         except ValueError as exc:
             return JSONResponse({"error": f"expires_at: {exc}"}, status_code=400)
 
+        odoo_api = (form.get("odoo_api") or bmya_auth.ODOO_API_AUTO).strip()
+        if odoo_api not in bmya_auth.ODOO_APIS:
+            return JSONResponse({"error": f"odoo_api: {odoo_api!r}"}, status_code=400)
+
         class _NotFound(Exception):
             pass
 
@@ -456,6 +460,13 @@ def build_console_app(settings: Settings = None) -> FastAPI:
                 grant["label"] = (form.get("label") or "").strip()
                 grant["notes"] = (form.get("notes") or "").strip()
                 grant["expires_at"] = expires_at
+                # Editable, unlike the URL: the login only has to match the
+                # owner of the API key the client already sends, so changing it
+                # cannot widen what the key reaches.
+                if "odoo_login" in form:
+                    grant["odoo_login"] = (form.get("odoo_login") or "").strip()
+                if "odoo_api" in form:
+                    grant["odoo_api"] = odoo_api
 
         try:
             bmya_registry.mutate_registry(settings.registry_file, _edit)
@@ -500,7 +511,9 @@ def build_console_app(settings: Settings = None) -> FastAPI:
             )
 
         result = probe.probe_grant(url, database, timeout=settings.probe_timeout)
-        return JSONResponse({"verdict": result.verdict, "detail": result.detail})
+        return JSONResponse(
+            {"verdict": result.verdict, "detail": result.detail, "version": result.version}
+        )
 
     # --- Usage
 

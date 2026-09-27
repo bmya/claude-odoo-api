@@ -8,6 +8,8 @@
     <tr><th>URL</th><td><code>{{ grant.odoo_url }}</code></td></tr>
     <tr><th>Base</th><td><code>{{ grant.database }}</code></td></tr>
     <tr><th>Modo</th><td>{{ grant.mode }}</td></tr>
+    <tr><th>API de Odoo</th><td>{{ grant.odoo_api or "auto" }}</td></tr>
+    <tr><th>Login de Odoo</th><td>{{ grant.odoo_login or "—" }}</td></tr>
     <tr><th>Etiqueta</th><td>{{ grant.label or "—" }}</td></tr>
     <tr><th>Creada</th><td>{{ grant.created_at or "—" }}</td></tr>
     <tr><th>Emitida por</th><td>{{ meta.created_by or "—" }}</td></tr>
@@ -50,6 +52,14 @@
   <form method="post" action="/grants/{{ grant.key_id }}/edit">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <label>Etiqueta<input type="text" name="label" value="{{ grant.label or '' }}"></label>
+    <label>Login de Odoo<input type="text" name="odoo_login" value="{{ grant.odoo_login or '' }}">
+      <span class="hint">Sólo Odoo 17/18. Tiene que ser el dueño de la API key que manda el cliente.</span></label>
+    <label>API de Odoo
+      <select name="odoo_api">
+        {% for api in ("auto", "json2", "jsonrpc") %}
+        <option value="{{ api }}" {% if (grant.odoo_api or "auto") == api %}selected{% endif %}>{{ api }}</option>
+        {% endfor %}
+      </select></label>
     <label>Expira<input type="date" name="expires_at" value="{{ (grant.expires_at or '')[:10] }}"></label>
     <label>Notas<textarea name="notes">{{ grant.notes or '' }}</textarea></label>
     <button type="submit" class="secondary">Guardar</button>

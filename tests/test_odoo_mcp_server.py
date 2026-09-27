@@ -66,6 +66,7 @@ class TestOdooClient:
     def test_make_request_success(self, mock_session):
         """Test successful API request"""
         mock_response = Mock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {"result": "success"}
         mock_response.raise_for_status = Mock()
 
@@ -647,8 +648,9 @@ class TestCallToolWithGrant:
 
         calls = []
 
-        def fake_get_or_create(url, database, api_key):
+        def fake_get_or_create(url, database, api_key, **options):
             calls.append((url, database, api_key))
+            client.creation_options = options
             return client
 
         monkeypatch.setattr(odoo_mcp_server, "_get_or_create_client", fake_get_or_create)

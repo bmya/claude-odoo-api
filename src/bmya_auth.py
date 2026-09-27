@@ -109,6 +109,14 @@ MODE_RO = "readonly"
 MODE_RW = "readwrite"
 MODES = (MODE_RO, MODE_RW)
 
+# How the server talks to a grant's instance. JSON-2 (/json/2/...) only exists
+# from Odoo 19; 17 and 18 are reached over JSON-RPC (/jsonrpc execute_kw), which
+# needs the user's login on top of the API key. "auto" asks the instance.
+ODOO_API_AUTO = "auto"
+ODOO_API_JSON2 = "json2"
+ODOO_API_JSONRPC = "jsonrpc"
+ODOO_APIS = (ODOO_API_AUTO, ODOO_API_JSON2, ODOO_API_JSONRPC)
+
 # Tools that mutate Odoo data. odoo_call_method is included because a business
 # method's whole point is to have side effects.
 WRITE_TOOLS = frozenset({"odoo_create", "odoo_write", "odoo_unlink", "odoo_call_method"})
@@ -128,6 +136,8 @@ _KNOWN_GRANT_FIELDS = frozenset(
         "odoo_url",
         "database",
         "mode",
+        "odoo_login",
+        "odoo_api",
         "allowed_methods",
         "allowed_models",
         "denied_models",
@@ -183,6 +193,9 @@ class Grant:
     revoked: bool = False
     expires_at: Optional[datetime] = None
     notes: str = ""
+    # Only needed for Odoo < 19: JSON-RPC resolves the uid from login + API key.
+    odoo_login: str = ""
+    odoo_api: str = ODOO_API_AUTO
 
     def is_expired(self, now: Optional[datetime] = None) -> bool:
         if self.expires_at is None:
@@ -201,6 +214,8 @@ class Grant:
             f"  Database:  {self.database}",
             f"  Mode:      {mode or self.mode}",
         ]
+        if self.odoo_login:
+            lines.append(f"  Login:     {self.odoo_login}")
         methods = self.allowed_methods if allowed_methods is None else allowed_methods
         if methods is not None:
             lines.append(f"  Methods:   {', '.join(sorted(methods)) if methods else '(none)'}")
@@ -398,6 +413,14 @@ def _parse_grant(raw: Any, index: int) -> Grant:
     if mode not in MODES:
         raise ValueError(f"{where}.mode must be one of {MODES}, got {mode!r}")
 
+    odoo_api = raw.get("odoo_api") or ODOO_API_AUTO
+    if odoo_api not in ODOO_APIS:
+        raise ValueError(f"{where}.odoo_api must be one of {ODOO_APIS}, got {odoo_api!r}")
+
+    odoo_login = raw.get("odoo_login") or ""
+    if not isinstance(odoo_login, str):
+        raise ValueError(f"{where}.odoo_login must be a string")
+
     grant = Grant(
         key_id=key_id,
         key_sha256=key_sha256,
@@ -412,6 +435,8 @@ def _parse_grant(raw: Any, index: int) -> Grant:
         revoked=bool(raw.get("revoked", False)),
         expires_at=_parse_datetime(raw.get("expires_at"), f"{where}.expires_at"),
         notes=(raw.get("notes") or "").strip(),
+        odoo_login=odoo_login.strip(),
+        odoo_api=odoo_api,
     )
     return grant
 

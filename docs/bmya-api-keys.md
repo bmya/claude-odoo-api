@@ -53,6 +53,8 @@ buscar en el registro en O(1).
       "odoo_url": "https://clientex.bmya.cloud",
       "database": "clientex_prod",
       "mode": "readonly",
+      "odoo_login": "",
+      "odoo_api": "auto",
       "allowed_methods": null,
       "allowed_models": null,
       "denied_models": ["res.users", "ir.config_parameter", "ir.mail_server"],
@@ -73,6 +75,8 @@ buscar en el registro en O(1).
 | `odoo_url` | sí | `https://` obligatorio, sin credenciales, sin query. Se rechaza si es IP loopback/privada/link-local, o si no termina en un sufijo de `BMYA_ALLOWED_URL_SUFFIXES`. |
 | `database` | sí | Nombre exacto de la base. |
 | `mode` | sí | `readonly` o `readwrite`. Cualquier otra cosa **rechaza el grant** (un typo tiene que hacer ruido, no degradar en silencio). |
+| `odoo_login` | sólo Odoo 17/18 | Login de Odoo del dueño de la API key que manda el cliente. JSON-RPC exige un uid y sólo se obtiene con `common.authenticate(db, login, key)`. En Odoo 19 no se usa. Editable desde la consola: tiene que coincidir con el dueño de la key, así que cambiarlo no amplía nada. |
+| `odoo_api` | no | `auto` (por defecto): el servidor pregunta la versión a la instancia (`/web/webclient/version_info`, público) y usa JSON-2 en 19+ y JSON-RPC en 17/18; un upgrade se sigue solo. `json2` / `jsonrpc` lo fijan, para cuando un proxy bloquea esa ruta. |
 | `allowed_methods` | no | Ausente o `null` ⇒ **hereda** la lista del servidor. `[]` ⇒ **ningún** método. Una lista ⇒ se intersecta con `ODOO_MCP_ALLOWED_METHODS`, así que sólo puede restringir. |
 | `allowed_models` | no | `null` ⇒ sin restricción. Lista ⇒ allowlist. |
 | `denied_models` | no | Se aplica último y gana siempre, incluso sobre `allowed_models`. |
@@ -203,8 +207,21 @@ grant (el nombre real se ve en el panel de Odoo.sh, o en *Ajustes → Acerca de*
 **`403`**: la API key de Odoo del usuario es inválida, fue revocada, o la API
 externa no está habilitada en esa instancia (requiere plan Custom).
 
-**HTML en lugar de JSON**: el endpoint `/json/2/` no está respondiendo como API;
-suele ser una redirección a la pantalla de login.
+**`redirected to /web/login`** o **HTML en lugar de JSON**: la instancia no
+tiene `/json/2/`, casi siempre porque es Odoo 17/18 y el grant quedó fijado en
+`odoo_api: json2` (con `auto` se detecta sola). `odoo_list_companies` muestra la
+API que se está usando: `Odoo API: jsonrpc (detected: Odoo 18.0)`. Antes de este
+cambio el mismo caso salía como `Expecting value: line 1 column 1 (char 0)`.
+
+**`... runs Odoo 18.0, which has no JSON-2 API ... needs the Odoo login`**: el
+grant no tiene `odoo_login`. Agregalo desde la consola (detalle de la key →
+Editar), sin reemitir la key ni tocar la configuración del cliente.
+
+**`Odoo rejected login 'x' with this API key`**: la API key de Odoo que manda el
+cliente no es de ese usuario. El servidor no reintenta durante
+`ODOO_AUTH_FAILURE_TTL` (60 s): Odoo bloquea por un minuto los logins de una IP
+tras 5 fallos, y todos los usuarios MCP de esa base comparten la IP del
+servidor.
 
 ## Cuánto tarda en aplicar un cambio
 

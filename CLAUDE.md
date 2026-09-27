@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server that provides tools to interact with Odoo 19's External JSON-2 API. The server supports multiple company/instance configurations and exposes 12 tools on Odoo databases: list_companies, search_read, create, write, unlink, search, read, search_count, list_models, fields_get, name_search, and call_method.
+This is an MCP (Model Context Protocol) server that provides tools to interact with Odoo 17, 18 and 19: Odoo 19's External JSON-2 API through `OdooClient`, and JSON-RPC `execute_kw` on 17/18 through `OdooLegacyClient`, which overrides only `_make_request` and translates the same JSON-2 payload (`ids` → first positional arg, `vals_list` positional for `create`, the rest as kwargs). `detect_odoo_api()` picks one per instance from the public `/web/webclient/version_info`, cached by URL; a grant can pin it with `odoo_api`, and 17/18 need `odoo_login` on the grant. The server supports multiple company/instance configurations and exposes 12 tools on Odoo databases: list_companies, search_read, create, write, unlink, search, read, search_count, list_models, fields_get, name_search, and call_method.
 
 The introspection tools (`list_models`, `fields_get`) and `name_search` are implemented on top of the proven `search_read` endpoint over the meta-models `ir.model` / `ir.model.fields` — they do NOT use new endpoints, since `/json/2/{model}/call` returns 404 on these instances. Note: `name_search` filters on the `name` field (not `display_name`, which is a non-searchable computed field on this instance and is silently ignored by ilike).
 

@@ -125,6 +125,8 @@ def cmd_new(args) -> int:
         "odoo_url": url,
         "database": args.database,
         "mode": args.mode,
+        "odoo_login": getattr(args, "odoo_login", None) or "",
+        "odoo_api": getattr(args, "odoo_api", None) or bmya_auth.ODOO_API_AUTO,
         "allowed_methods": _split_csv(args.methods),
         "allowed_models": _split_csv(args.allow_models),
         "denied_models": _split_csv(args.deny_models) or [],
@@ -449,6 +451,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--allow-models", help="comma-separated model allowlist")
     p_new.add_argument("--deny-models", help="comma-separated model denylist")
     p_new.add_argument("--notes", help="free-form note, e.g. a contact address")
+    p_new.add_argument(
+        "--odoo-login",
+        help="Odoo login of the API key's owner; required for Odoo 17/18 (JSON-RPC)",
+    )
+    p_new.add_argument(
+        "--odoo-api",
+        choices=list(bmya_auth.ODOO_APIS),
+        default=bmya_auth.ODOO_API_AUTO,
+        help="how the server talks to Odoo (default: auto-detect from the instance version)",
+    )
     p_new.add_argument(
         "--client-name",
         help="short name for the MCP server entry in client snippets "

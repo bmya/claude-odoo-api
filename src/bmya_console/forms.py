@@ -93,6 +93,16 @@ def parse_grant_form(form) -> tuple:
 
     denied_models = _lines(form.get("denied_models"))
 
+    odoo_api = (form.get("odoo_api") or bmya_auth.ODOO_API_AUTO).strip()
+    if odoo_api not in bmya_auth.ODOO_APIS:
+        errors.append("Opción de API de Odoo inválida.")
+    odoo_login = (form.get("odoo_login") or "").strip()
+    if odoo_api == bmya_auth.ODOO_API_JSONRPC and not odoo_login:
+        errors.append(
+            "Con la API fijada en JSON-RPC (Odoo 17/18) el login de Odoo es obligatorio: "
+            "sin él el servidor no puede resolver el uid."
+        )
+
     expires_at = None
     try:
         expires_at = bmya_snippets.parse_expiry((form.get("expires_at") or "").strip())
@@ -107,6 +117,8 @@ def parse_grant_form(form) -> tuple:
         "odoo_url": url,
         "database": database,
         "mode": mode,
+        "odoo_login": odoo_login,
+        "odoo_api": odoo_api,
         "allowed_methods": allowed_methods,
         "allowed_models": allowed_models,
         "denied_models": denied_models,

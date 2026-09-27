@@ -1,5 +1,57 @@
 # Changelog
 
+## [Unreleased] - 2026-09-27 — Odoo 17 y 18 por JSON-RPC
+
+### Added
+- **El servidor atiende instancias Odoo 17 y 18, en la misma URL.** Hasta ahora
+  hablaba sólo JSON-2 (`/json/2/...`), que existe desde Odoo 19. En 17/18 esa
+  ruta redirige a `/web/login`, `requests` seguía el 303 y parseaba la página de
+  login: todas las tools salvo `odoo_list_companies` (que no toca Odoo)
+  respondían `Expecting value: line 1 column 1 (char 0)`. Es lo que reportó APV
+  sobre `odoo18e_apv`.
+  Para esas versiones hay un `OdooLegacyClient` que va por `/jsonrpc`
+  (`execute_kw`). Sólo cambia el transporte: traduce el mismo payload de JSON-2
+  (`ids` pasa a ser el primer argumento posicional, el resto son kwargs), así
+  que las 12 tools, la autorización y el metering no se enteran.
+- **Detección de versión por instancia.** `/web/webclient/version_info` es
+  público en 16–19: 19+ va por JSON-2 y el resto por JSON-RPC. Se cachea por URL
+  (`ODOO_VERSION_CACHE_TTL`, 3600 s), así que un upgrade 18→19 cambia de API
+  solo, sin tocar el grant ni la configuración del cliente. Si la detección
+  falla se asume JSON-2, que es lo que se hacía antes, y el fallo se recuerda
+  sólo `ODOO_VERSION_FAILURE_TTL` (60 s).
+  Se eligió esto antes que una URL aparte para versiones viejas: eso obligaría a
+  duplicar el despliegue y las rutas, y dejaría al cliente a cargo de saber su
+  versión, con la configuración rota sin aviso al primer upgrade.
+- **Campos de grant `odoo_login` y `odoo_api`.** JSON-RPC acepta la API key como
+  password pero exige un uid, y la única forma de obtenerlo a partir de la key
+  es `common.authenticate` con el login. Va en el grant, no en un header: el
+  cliente no cambia nada, y a un grant existente se le agrega desde la consola
+  (a diferencia de la URL es editable, porque tiene que coincidir con el dueño
+  de la API key que manda el cliente y no amplía nada). `odoo_api`
+  (`auto` | `json2` | `jsonrpc`, por defecto `auto`) fija el transporte si un
+  proxy bloquea `version_info`. Ambos son opcionales: un servidor anterior los
+  ignora con un warning, así que el registro sigue siendo `version: 1`.
+  `odoo_list_companies` muestra el login y la API resuelta, p. ej.
+  `jsonrpc (detected: Odoo 18.0)`.
+- La consola y `tools/bmya-keys.py` (`--odoo-login`, `--odoo-api`) exponen los
+  campos, y el probe pregunta la versión primero. En 17/18 verifica la base con
+  `db.db_exist` en lugar de un `authenticate` fallido: cada login fallido suma al
+  cooldown por IP de Odoo, y esa IP es la misma que usa el servidor MCP.
+
+### Fixed
+- **`mcp` queda fijado en `>=1.28,<2`** (`requirements.txt` y `pyproject.toml`).
+  Con `mcp>=1.0.0`, una instalación limpia hoy trae la 2.x, que quitó
+  `Server.list_tools` y el resto de la API de decoradores sobre la que está
+  escrito el servidor: una imagen reconstruida desde cero no arrancaba.
+  Producción corre 1.28.1 (el "v1.28.1" que reportan los clientes es la versión
+  del SDK, no del servidor).
+- **`OdooClient` ya no sigue redirects.** Un 3xx pasa a ser un error que dice
+  a dónde redirigió y que `/json/2` requiere Odoo 19.
+- **Un cuerpo que no es JSON se reporta como tal**, con el status y el
+  `Content-Type`. `requests.exceptions.JSONDecodeError` hereda de
+  `RequestException` desde requests 2.27, así que el `except RequestException`
+  lo atrapaba antes que el `except json.JSONDecodeError` y se relanzaba crudo.
+
 ## [Unreleased] - 2026-09-17 (bis) — Consola web para emitir y revocar keys
 
 ### Added

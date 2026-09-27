@@ -72,6 +72,28 @@ def build_registry_data():
     }
 
 
+@pytest.fixture(autouse=True)
+def _no_odoo_version_probe(request, monkeypatch):
+    """Keep version detection off the network: every instance answers JSON-2.
+
+    Resolving a client, and odoo_list_companies, ask the instance its version.
+    Unpatched, a test would reach out to clientex.bmya.cloud. Tests of the
+    detection itself opt out with @pytest.mark.real_version_probe.
+
+    Looked up in sys.modules rather than imported: the console tests run in an
+    environment without the MCP server's dependencies.
+    """
+    server = sys.modules.get("odoo_mcp_server")
+    if server is None:
+        yield
+        return
+    server._odoo_api_cache.clear()
+    if request.node.get_closest_marker("real_version_probe") is None:
+        monkeypatch.setattr(server, "detect_odoo_api", lambda url: ("json2", "19.0"))
+    yield
+    server._odoo_api_cache.clear()
+
+
 @pytest.fixture
 def registry_path(tmp_path):
     """Write a registry file and return its path."""

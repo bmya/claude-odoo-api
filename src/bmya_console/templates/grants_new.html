@@ -28,6 +28,24 @@
     </span>
   </label>
 
+  <label>Login de Odoo
+    <input type="text" name="odoo_login" placeholder="usuario@cliente.cl" value="{{ form.odoo_login or '' }}">
+    <span class="hint">
+      Sólo para Odoo 17 y 18: no tienen API JSON-2, y por JSON-RPC el servidor necesita el login
+      del dueño de la API key para resolver su uid. En Odoo 19 dejalo vacío.
+    </span>
+  </label>
+
+  <fieldset>
+    <legend>API de Odoo</legend>
+    <label class="choice"><input type="radio" name="odoo_api" value="auto" {% if form.odoo_api not in ('json2', 'jsonrpc') %}checked{% endif %}>
+      <span><strong>Detectar</strong><span class="hint">El servidor le pregunta la versión a la instancia: 19+ va por JSON-2, 17/18 por JSON-RPC. Sigue sola un upgrade.</span></span></label>
+    <label class="choice"><input type="radio" name="odoo_api" value="json2" {% if form.odoo_api == 'json2' %}checked{% endif %}>
+      <span><strong>JSON-2</strong><span class="hint">Fijo. Sólo si la detección falla (p. ej. un proxy bloquea <code>/web/webclient/version_info</code>).</span></span></label>
+    <label class="choice"><input type="radio" name="odoo_api" value="jsonrpc" {% if form.odoo_api == 'jsonrpc' %}checked{% endif %}>
+      <span><strong>JSON-RPC</strong><span class="hint">Fijo, para Odoo 17/18. Exige el login.</span></span></label>
+  </fieldset>
+
   <fieldset>
     <legend>Modo</legend>
     <label class="choice"><input type="radio" name="mode" value="readonly" {% if form.mode != 'readwrite' %}checked{% endif %}>

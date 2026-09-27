@@ -1,6 +1,6 @@
-# Odoo 19 MCP Server
+# Odoo MCP Server (Odoo 17, 18 y 19)
 
-A Model Context Protocol (MCP) server that provides tools to interact with Odoo 19's External JSON-2 API. This server enables Claude and other MCP clients to perform CRUD operations and queries on Odoo databases.
+A Model Context Protocol (MCP) server that provides tools to interact with Odoo: the External JSON-2 API on Odoo 19+, and JSON-RPC (`/jsonrpc`, `execute_kw`) on Odoo 17 and 18. The version is detected per instance from `/web/webclient/version_info`, so one server URL serves all three. This server enables Claude and other MCP clients to perform CRUD operations and queries on Odoo databases.
 
 ## Features
 
@@ -122,7 +122,8 @@ Resolve records by name (e.g., find a partner or product without building a doma
 
 - Python 3.10 or higher (for local development)
 - Docker and Docker Compose (for containerized deployment)
-- Odoo 19 instance with External API enabled
+- Odoo 17, 18 or 19 instance with External API enabled
+- For Odoo 17/18: the Odoo login of the API key's owner (`odoo_login` on the BMYA grant, or `ODOO_LOGIN` in a `.env` section). JSON-RPC needs a uid, and the only way to get one from an API key is `common.authenticate` with the login.
 - Odoo API key (see Configuration section)
 
 ## Configuration

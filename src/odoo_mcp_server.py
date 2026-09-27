@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Odoo 19 MCP Server
+Odoo MCP Server (Odoo 17, 18 and 19)
 
-This MCP server provides tools to interact with Odoo 19's External JSON-2 API.
+This MCP server provides tools to interact with Odoo: the External JSON-2 API
+on Odoo 19+, JSON-RPC (execute_kw) on Odoo 17 and 18.
 Supports multiple company configurations with enhanced error handling, retry logic,
 and image processing capabilities.
 """
@@ -38,6 +39,16 @@ CONFIG_FILE = os.getenv("ODOO_CONFIG_FILE", ".env")
 # Request configuration from environment
 REQUEST_TIMEOUT = int(os.getenv("ODOO_REQUEST_TIMEOUT", "30"))
 MAX_RETRIES = int(os.getenv("ODOO_MAX_RETRIES", "3"))
+
+# Version detection (see detect_odoo_api): how long an instance's answer is
+# trusted, and how long a failed probe is remembered before trying again.
+ODOO_VERSION_CACHE_TTL = int(os.getenv("ODOO_VERSION_CACHE_TTL", "3600"))
+ODOO_VERSION_FAILURE_TTL = int(os.getenv("ODOO_VERSION_FAILURE_TTL", "60"))
+ODOO_VERSION_TIMEOUT = float(os.getenv("ODOO_VERSION_TIMEOUT", "5"))
+
+# JSON-RPC (Odoo < 19): how long a rejected login+key is answered from memory
+# instead of retried. See OdooLegacyClient._authenticate.
+ODOO_AUTH_FAILURE_TTL = int(os.getenv("ODOO_AUTH_FAILURE_TTL", "60"))
 
 # Transport: "stdio" (default, local one-process-per-user) or "http"
 # (Streamable HTTP, shareable over the network). In HTTP mode credentials are
@@ -124,10 +135,33 @@ class OdooClient:
 
         return session
 
+    # Appended to the error when a request comes back as a redirect or as
+    # non-JSON: on this transport that almost always means "not Odoo 19".
+    _NOT_AN_API_HINT = (
+        "The instance did not answer as a JSON-2 API; /json/2 only exists from "
+        "Odoo 19, so an older instance redirects it to /web/login."
+    )
+
     def _make_request(self, model: str, method: str, payload: dict) -> Any:
         """Make a request to the Odoo API with timeout and error handling"""
         endpoint = f"{self.url}/json/2/{model}/{method}"
+        result = self._post_json(endpoint, payload)
 
+        # Validate response structure
+        if isinstance(result, dict) and 'error' in result:
+            error_msg = result.get('error', {}).get('message', 'Unknown error')
+            logger.error(f"Odoo API returned error: {error_msg}")
+            raise ValueError(f"Odoo API error: {error_msg}")
+
+        return result
+
+    def _post_json(self, endpoint: str, payload: dict) -> Any:
+        """POST a JSON body and return the decoded JSON answer.
+
+        Redirects are not followed: Odoo answers an unknown API route with a
+        redirect to /web/login, and following it turns a clear "wrong API" into
+        a login page parsed as JSON ("Expecting value: line 1 column 1").
+        """
         start_time = time.time()
         logger.debug(f"Making request to {endpoint} with payload: {json.dumps(payload, default=str)[:200]}...")
 
@@ -135,22 +169,9 @@ class OdooClient:
             response = self.session.post(
                 endpoint,
                 json=payload,
-                timeout=REQUEST_TIMEOUT
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
             )
-
-            elapsed = time.time() - start_time
-            logger.debug(f"Request completed in {elapsed:.2f}s with status {response.status_code}")
-
-            response.raise_for_status()
-            result = response.json()
-
-            # Validate response structure
-            if isinstance(result, dict) and 'error' in result:
-                error_msg = result.get('error', {}).get('message', 'Unknown error')
-                logger.error(f"Odoo API returned error: {error_msg}")
-                raise ValueError(f"Odoo API error: {error_msg}")
-
-            return result
 
         except requests.exceptions.Timeout:
             logger.error(f"Request timeout after {REQUEST_TIMEOUT}s for {endpoint}")
@@ -160,25 +181,42 @@ class OdooClient:
             logger.error(f"Connection error to {endpoint}: {e}")
             raise ConnectionError(f"Failed to connect to Odoo API: {e}")
 
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error {e.response.status_code} for {endpoint}: {e}")
-            try:
-                error_detail = e.response.json()
-                raise ValueError(f"Odoo API HTTP {e.response.status_code}: {error_detail}")
-            except json.JSONDecodeError:
-                raise ValueError(f"Odoo API HTTP {e.response.status_code}: {e.response.text}")
-
         except requests.exceptions.RequestException as e:
             logger.error(f"Request failed for {endpoint}: {e}")
             raise
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON response from {endpoint}: {e}")
-            raise ValueError(f"Invalid JSON response from Odoo API: {e}")
+        elapsed = time.time() - start_time
+        logger.debug(f"Request completed in {elapsed:.2f}s with status {response.status_code}")
 
-        except Exception as e:
-            logger.error(f"Unexpected error for {endpoint}: {e}")
-            raise
+        if 300 <= response.status_code < 400:
+            location = response.headers.get("Location", "?")
+            logger.error(f"Redirect {response.status_code} to {location} for {endpoint}")
+            raise ValueError(
+                f"Odoo API HTTP {response.status_code}: redirected to {location}. "
+                f"{self._NOT_AN_API_HINT}"
+            )
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP error {e.response.status_code} for {endpoint}: {e}")
+            try:
+                error_detail = e.response.json()
+            except ValueError:
+                raise ValueError(f"Odoo API HTTP {e.response.status_code}: {e.response.text}")
+            raise ValueError(f"Odoo API HTTP {e.response.status_code}: {error_detail}")
+
+        try:
+            return response.json()
+        except ValueError as e:
+            # requests' JSONDecodeError is a ValueError and, since 2.27, also a
+            # RequestException -- caught here, before it can escape untranslated.
+            content_type = response.headers.get("Content-Type", "?")
+            logger.error(f"Invalid JSON response from {endpoint} ({content_type}): {e}")
+            raise ValueError(
+                f"Invalid JSON response from Odoo API (HTTP {response.status_code}, "
+                f"{content_type}): {e}. {self._NOT_AN_API_HINT}"
+            )
 
     def search_read(
         self,
@@ -267,6 +305,105 @@ class OdooClient:
         return self._make_request(model, method, payload)
 
 
+class OdooLegacyClient(OdooClient):
+    """Client for Odoo 17/18, which have no JSON-2 API: JSON-RPC over /jsonrpc.
+
+    Only the transport changes. Every public method builds the same JSON-2
+    payload as its parent and ends in _make_request, which is the one thing
+    overridden here, so the tools behave identically on both paths.
+
+    JSON-RPC takes the API key as the password but needs a uid, and the only way
+    to get a uid from a key is ``common.authenticate`` with the user's login --
+    hence the extra ``login``, which JSON-2 never needed.
+    """
+
+    _NOT_AN_API_HINT = "The instance did not answer as an Odoo JSON-RPC endpoint (/jsonrpc)."
+
+    def __init__(self, url: str, database: str, api_key: str, login: str):
+        if not login:
+            raise ValueError("OdooLegacyClient needs the Odoo login of the API key's owner")
+        self.login = login
+        self._uid: Optional[int] = None
+        self._auth_failed_until = 0.0
+        self._rpc_id = 0
+        super().__init__(url, database, api_key)
+        # JSON-RPC authenticates in the body; the key must not also travel as a
+        # bearer token to an instance that does not expect one.
+        self.session.headers.pop("Authorization", None)
+        self.session.headers.pop("X-Odoo-Database", None)
+
+    def _rpc(self, service: str, method: str, args: list) -> Any:
+        self._rpc_id += 1
+        answer = self._post_json(
+            f"{self.url}/jsonrpc",
+            {
+                "jsonrpc": "2.0",
+                "method": "call",
+                "params": {"service": service, "method": method, "args": args},
+                "id": self._rpc_id,
+            },
+        )
+        if not isinstance(answer, dict):
+            raise ValueError(f"Unexpected JSON-RPC answer from Odoo: {answer!r}"[:300])
+        if "error" in answer:
+            error = answer.get("error") or {}
+            data = error.get("data") or {}
+            # "Odoo Server Error" is the envelope; the useful text is in data.
+            name = (data.get("name") or "").rsplit(".", 1)[-1]
+            message = data.get("message") or error.get("message") or "Unknown error"
+            logger.error(f"Odoo JSON-RPC error {name}: {message}")
+            raise ValueError(f"Odoo API error ({name}): {message}" if name else f"Odoo API error: {message}")
+        return answer.get("result")
+
+    def _authenticate(self) -> int:
+        """Resolve the uid once per client, and back off after a rejection.
+
+        Odoo counts failed logins per source IP and database, and after five it
+        refuses every login from that IP for a minute. Every MCP user of an
+        instance shares this server's IP, so one tenant with a wrong login
+        retrying on each call would lock the others out. A rejection is
+        therefore answered from memory for ODOO_AUTH_FAILURE_TTL seconds.
+        """
+        if self._uid is not None:
+            return self._uid
+        rejected = (
+            f"Odoo rejected login {self.login!r} with this API key on database "
+            f"{self.database!r}: the API key must belong to that user."
+        )
+        if time.time() < self._auth_failed_until:
+            raise ValueError(f"{rejected} (not retried for {ODOO_AUTH_FAILURE_TTL}s)")
+        uid = self._rpc("common", "authenticate", [self.database, self.login, self.api_key, {}])
+        if not uid:
+            self._auth_failed_until = time.time() + ODOO_AUTH_FAILURE_TTL
+            raise ValueError(rejected)
+        self._uid = uid
+        return self._uid
+
+    def _make_request(self, model: str, method: str, payload: dict) -> Any:
+        """Translate a JSON-2 call into ``execute_kw``.
+
+        JSON-2 takes the records as ``ids`` and everything else as keyword
+        arguments; execute_kw takes the records as the first positional argument.
+        That is the whole mapping, for CRUD and business methods alike, with one
+        exception: 17/18's ``call_kw`` reads ``args[0]`` after an
+        ``@api.model_create_multi`` call to decide between ``.id`` and ``.ids``,
+        so ``create`` needs ``vals_list`` positional (IndexError otherwise).
+        """
+        kwargs = dict(payload)
+        if "ids" in kwargs:
+            args = [kwargs.pop("ids")]
+        elif method == "create" and "vals_list" in kwargs:
+            args = [kwargs.pop("vals_list")]
+        else:
+            args = []
+        uid = self._authenticate()
+        return self._rpc(
+            "object",
+            "execute_kw",
+            [self.database, uid, self.api_key, model, method, args, kwargs],
+        )
+
+
 def _format_call_method_result(result: Any) -> str:
     """Render a business-method result: readable notification message if present,
     otherwise the raw JSON (handles ir.actions.client dicts, bool and None)."""
@@ -309,7 +446,10 @@ def load_company_configs() -> Dict[str, Dict[str, str]]:
             'url': config.get(section, 'ODOO_URL'),
             'database': config.get(section, 'ODOO_DATABASE'),
             'api_key': config.get(section, 'ODOO_API_KEY'),
-            'company_id': config.get(section, 'COMPANY_ID', fallback='1')
+            'company_id': config.get(section, 'COMPANY_ID', fallback='1'),
+            # Only for Odoo < 19 (JSON-RPC); see OdooLegacyClient.
+            'login': config.get(section, 'ODOO_LOGIN', fallback=''),
+            'api': config.get(section, 'ODOO_API', fallback=bmya.ODOO_API_AUTO),
         }
 
     if not company_configs:
@@ -329,10 +469,13 @@ def get_odoo_client(company: str) -> OdooClient:
             raise ValueError(f"Company '{company}' not found. Available companies: {available}")
 
         config = configs[company]
-        odoo_clients[company] = OdooClient(
+        odoo_clients[company] = _build_client(
             config['url'],
             config['database'],
-            config['api_key']
+            config['api_key'],
+            login=config.get('login', ''),
+            api=_select_api(config['url'], config.get('api', bmya.ODOO_API_AUTO)),
+            login_hint=f"add ODOO_LOGIN to the [{company}] section of the .env",
         )
         logger.info(f"Created Odoo client for company: {company}")
 
@@ -345,7 +488,82 @@ def list_available_companies() -> list[str]:
     return list(configs.keys())
 
 
-def _get_or_create_client(url: str, database: str, api_key: str) -> OdooClient:
+# url -> (expires_at, api, server_serie). Per instance, not per database: every
+# database on one Odoo server runs the same version.
+_odoo_api_cache: Dict[str, tuple] = {}
+
+
+def detect_odoo_api(url: str) -> tuple:
+    """Ask an instance which API it speaks: ``(api, server_serie)``.
+
+    /web/webclient/version_info is public (auth='none') and exists on 16-19, so
+    this needs no credentials. Odoo 19+ gets JSON-2; anything older JSON-RPC,
+    which 19 still serves too, so a wrong guess towards jsonrpc is harmless.
+
+    A failed probe falls back to JSON-2 -- what the server did before detection
+    existed -- and is remembered only briefly, so a blip does not pin a tenant
+    to the wrong API for an hour.
+    """
+    url = url.rstrip("/")
+    now = time.time()
+    hit = _odoo_api_cache.get(url)
+    if hit is not None and hit[0] > now:
+        return hit[1], hit[2]
+
+    try:
+        response = requests.post(
+            f"{url}/web/webclient/version_info",
+            json={"jsonrpc": "2.0", "method": "call", "params": {}},
+            timeout=ODOO_VERSION_TIMEOUT,
+            allow_redirects=False,
+        )
+        response.raise_for_status()
+        info = response.json()["result"]
+        major = int(info["server_version_info"][0])
+        serie = str(info.get("server_serie") or major)
+    except Exception as exc:  # noqa: BLE001 - any failure means "could not tell"
+        logger.warning(f"Could not detect the Odoo version of {url} ({exc}); assuming JSON-2")
+        _odoo_api_cache[url] = (now + ODOO_VERSION_FAILURE_TTL, bmya.ODOO_API_JSON2, None)
+        return bmya.ODOO_API_JSON2, None
+
+    api = bmya.ODOO_API_JSON2 if major >= 19 else bmya.ODOO_API_JSONRPC
+    logger.info(f"{url} runs Odoo {serie}: using {api}")
+    _odoo_api_cache[url] = (now + ODOO_VERSION_CACHE_TTL, api, serie)
+    return api, serie
+
+
+def _select_api(url: str, pinned: str) -> str:
+    """The API to use: the pinned one, or the detected one for ``auto``."""
+    if pinned and pinned != bmya.ODOO_API_AUTO:
+        return pinned
+    return detect_odoo_api(url)[0]
+
+
+def _build_client(
+    url: str, database: str, api_key: str, *, login: str, api: str, login_hint: str
+) -> OdooClient:
+    if api == bmya.ODOO_API_JSONRPC:
+        if not login:
+            serie = detect_odoo_api(url)[1]
+            version = f"Odoo {serie}" if serie else "an Odoo older than 19"
+            raise ValueError(
+                f"{url} runs {version}, which has no JSON-2 API: the server reaches "
+                f"it over JSON-RPC and needs the Odoo login of the API key's owner "
+                f"({login_hint})."
+            )
+        return OdooLegacyClient(url, database, api_key, login)
+    return OdooClient(url, database, api_key)
+
+
+def _get_or_create_client(
+    url: str,
+    database: str,
+    api_key: str,
+    *,
+    login: str = "",
+    api: str = bmya.ODOO_API_JSON2,
+    login_hint: str = "set odoo_login on the BMYA grant",
+) -> OdooClient:
     """Get or create a client keyed by a hash of its credentials.
 
     Keying on the credential hash (not on a company name) isolates tenants: two
@@ -357,14 +575,16 @@ def _get_or_create_client(url: str, database: str, api_key: str) -> OdooClient:
     credential triples grows with every user, so an unbounded cache leaks memory
     and sockets. Evicted clients get their session closed.
     """
-    key = hashlib.sha256(f"{url}|{database}|{api_key}".encode()).hexdigest()
+    # api and login are part of the key: an instance upgraded from 18 to 19
+    # gets a fresh JSON-2 client instead of its cached JSON-RPC one.
+    key = hashlib.sha256(f"{url}|{database}|{api_key}|{api}|{login}".encode()).hexdigest()
 
     client = _http_clients.get(key)
     if client is not None:
         _http_clients.move_to_end(key)
         return client
 
-    client = OdooClient(url, database, api_key)
+    client = _build_client(url, database, api_key, login=login, api=api, login_hint=login_hint)
     _http_clients[key] = client
     while len(_http_clients) > ODOO_CLIENT_CACHE_MAX:
         _, evicted = _http_clients.popitem(last=False)
@@ -409,7 +629,13 @@ def resolve_odoo_client(arguments: dict, grant: Optional[bmya.Grant] = None) -> 
                 "Missing X-Odoo-Api-Key header: send your own Odoo API key "
                 "(Odoo: Preferences -> Account Security -> New API key)."
             )
-        return _get_or_create_client(grant.odoo_url, grant.database, api_key)
+        return _get_or_create_client(
+            grant.odoo_url,
+            grant.database,
+            api_key,
+            login=grant.odoo_login,
+            api=_select_api(grant.odoo_url, grant.odoo_api),
+        )
 
     if headers is not None:
         if bmya.BMYA_AUTH_ENABLED:
@@ -421,7 +647,13 @@ def resolve_odoo_client(arguments: dict, grant: Optional[bmya.Grant] = None) -> 
         database = headers.get(HEADER_DB)
         api_key = headers.get(HEADER_KEY)
         if url and database and api_key:
-            return _get_or_create_client(url, database, api_key)
+            return _get_or_create_client(
+                url,
+                database,
+                api_key,
+                api=_select_api(url, bmya.ODOO_API_AUTO),
+                login_hint="the X-Odoo-* headers path supports Odoo 19+ only; use a BMYA grant",
+            )
 
     company = arguments.get("company")
     if company:
@@ -469,10 +701,11 @@ def _describe_connection(headers, grant: Optional[bmya.Grant], mode: Optional[st
     to any caller.
     """
     if grant is not None:
-        return grant.describe(
+        text = grant.describe(
             mode=mode,
             allowed_methods=bmya.effective_allowed_methods(grant, ODOO_ALLOWED_METHODS),
         )
+        return f"{text}\n  Odoo API:  {_describe_api(grant.odoo_url, grant.odoo_api)}"
 
     if headers is not None and headers.get(HEADER_URL):
         return (
@@ -483,6 +716,16 @@ def _describe_connection(headers, grant: Optional[bmya.Grant], mode: Optional[st
 
     companies = list_available_companies()
     return f"Available companies: {', '.join(companies)}\n\nTotal: {len(companies)}"
+
+
+def _describe_api(url: str, pinned: str) -> str:
+    """One line on how this instance is reached, so a caller can self-diagnose."""
+    if pinned and pinned != bmya.ODOO_API_AUTO:
+        return f"{pinned} (pinned on the grant)"
+    api, serie = detect_odoo_api(url)
+    if serie is None:
+        return f"{api} (version detection failed; assumed)"
+    return f"{api} (detected: Odoo {serie})"
 
 
 def _all_tools() -> list[Tool]:
