@@ -309,6 +309,81 @@ class TestEdit:
         assert open(console_settings.registry_file, "rb").read() == before
 
 
+class TestEditMethods:
+    """Methods can change on a live key; the mode still cannot."""
+
+    def _mint_rw(self, client, settings, **overrides):
+        mint(client, mode="readwrite", **overrides)
+        return grants_of(settings)[0]["key_id"]
+
+    def _edit(self, client, key_id, **fields):
+        data = {"csrf_token": csrf_from(client), "label": "x"}
+        data.update(fields)
+        return client.post(f"/grants/{key_id}/edit", data=data, follow_redirects=False)
+
+    def test_a_list_can_be_added_to_an_inheriting_key(self, logged_in_client, console_settings):
+        key_id = self._mint_rw(logged_in_client, console_settings)
+        assert grants_of(console_settings)[0]["allowed_methods"] is None
+
+        response = self._edit(
+            logged_in_client, key_id,
+            methods_mode="list", methods_list="account.move.action_post\nsale.order.action_confirm",
+        )
+
+        assert response.status_code == 303
+        assert grants_of(console_settings)[0]["allowed_methods"] == [
+            "account.move.action_post", "sale.order.action_confirm"
+        ]
+
+    def test_the_three_states_stay_distinct(self, logged_in_client, console_settings):
+        key_id = self._mint_rw(logged_in_client, console_settings)
+
+        self._edit(logged_in_client, key_id, methods_mode="none")
+        assert grants_of(console_settings)[0]["allowed_methods"] == []
+
+        self._edit(logged_in_client, key_id, methods_mode="inherit")
+        assert grants_of(console_settings)[0]["allowed_methods"] is None
+
+    def test_list_with_an_empty_box_is_refused_not_silently_none(
+        self, logged_in_client, console_settings
+    ):
+        key_id = self._mint_rw(logged_in_client, console_settings)
+        before = open(console_settings.registry_file, "rb").read()
+
+        response = self._edit(logged_in_client, key_id, methods_mode="list", methods_list="  ")
+
+        assert response.status_code == 400
+        assert open(console_settings.registry_file, "rb").read() == before
+
+    def test_the_change_is_in_the_history_with_before_and_after(
+        self, logged_in_client, console_settings
+    ):
+        key_id = self._mint_rw(logged_in_client, console_settings)
+
+        self._edit(logged_in_client, key_id, methods_mode="list",
+                   methods_list="account.move.action_post")
+
+        page = logged_in_client.get(f"/grants/{key_id}").text
+        assert "métodos: hereda -&gt; account.move.action_post" in page
+
+    def test_the_new_list_is_what_the_server_enforces(self, logged_in_client, console_settings):
+        plaintext = shown_key(mint(logged_in_client, mode="readwrite"))
+        key_id = grants_of(console_settings)[0]["key_id"]
+
+        self._edit(logged_in_client, key_id, methods_mode="none")
+
+        grant = bmya_auth.resolve_grant({"x-bmya-api-key": plaintext})
+        assert grant.allowed_methods == frozenset()
+
+    def test_saving_other_fields_leaves_methods_alone(self, logged_in_client, console_settings):
+        """Old clients of the edit route send no methods_mode at all."""
+        key_id = self._mint_rw(logged_in_client, console_settings, methods_mode="none")
+
+        self._edit(logged_in_client, key_id, notes="solo notas")
+
+        assert grants_of(console_settings)[0]["allowed_methods"] == []
+
+
 class TestOdooLegacyFields:
     """Odoo 17/18: the grant carries the login JSON-RPC needs for the uid."""
 

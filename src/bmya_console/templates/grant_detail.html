@@ -36,7 +36,7 @@
   <h2>Historial</h2>
   <table>
     <tr><th>Cuándo</th><th>Quién</th><th>Qué</th></tr>
-    {% for h in meta.history %}<tr><td>{{ h.at }}</td><td>{{ h.actor }}</td><td>{{ h.action }}</td></tr>{% endfor %}
+    {% for h in meta.history %}<tr><td>{{ h.at }}</td><td>{{ h.actor }}</td><td>{{ h.action }}{% if h.detail %} <span class="muted">({{ h.detail }})</span>{% endif %}</td></tr>{% endfor %}
   </table>
 </div>
 {% endif %}
@@ -47,7 +47,8 @@
   <p class="muted">
     La URL, la base y el modo no se editan: cambiarlos reapunta una credencial que el cliente ya
     tiene, y pasar de lectura a escritura escalaría en silencio una key ya instalada.
-    Para eso, revocá y emití una nueva.
+    Para eso, revocá y emití una nueva. Los métodos sí se editan: cada cambio queda en el
+    historial con el antes y el después.
   </p>
   <form method="post" action="/grants/{{ grant.key_id }}/edit">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -62,6 +63,25 @@
       </select></label>
     <label>Expira<input type="date" name="expires_at" value="{{ (grant.expires_at or '')[:10] }}"></label>
     <label>Notas<textarea name="notes">{{ grant.notes or '' }}</textarea></label>
+    {% set mm = "inherit" if grant.allowed_methods is none else ("none" if not grant.allowed_methods else "list") %}
+    <fieldset>
+      <legend>Métodos de negocio (<code>odoo_call_method</code>)</legend>
+      {% if grant.mode != "readwrite" %}
+      <p class="hint">Esta key es de sólo lectura: <code>odoo_call_method</code> queda bloqueado igual,
+        sea cual sea esta lista.</p>
+      {% endif %}
+      <label class="choice"><input type="radio" name="methods_mode" value="inherit" {% if mm == "inherit" %}checked{% endif %}>
+        <span><strong>Hereda la lista del servidor</strong>
+        <span class="hint">Hoy:
+          {% for m in server_methods %}<code>{{ m }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</span></span></label>
+      <label class="choice"><input type="radio" name="methods_mode" value="none" {% if mm == "none" %}checked{% endif %}>
+        <span><strong>Ningún método</strong></span></label>
+      <label class="choice"><input type="radio" name="methods_mode" value="list" {% if mm == "list" %}checked{% endif %}>
+        <span><strong>Sólo estos</strong>
+        <span class="hint">Uno por línea, <code>modelo.metodo</code>. Se intersecta con la lista del servidor:
+          un método que el servidor no permite no se habilita por ponerlo acá.</span></span></label>
+      <textarea name="methods_list" placeholder="account.move.action_post">{{ (grant.allowed_methods or [])|join("\n") }}</textarea>
+    </fieldset>
     <button type="submit" class="secondary">Guardar</button>
   </form>
 </div>

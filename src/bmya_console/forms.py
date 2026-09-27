@@ -32,6 +32,40 @@ def _lines(raw):
     return items
 
 
+def parse_methods(form) -> tuple:
+    """``(allowed_methods, errors)`` from the methods tri-state.
+
+    Shared by minting and editing so both enforce the same rule: "sólo estos"
+    with an empty box is an error, never a silent ``[]``.
+    """
+    errors = []
+    methods_mode = (form.get("methods_mode") or "inherit").strip()
+    allowed_methods = None
+    if methods_mode not in METHODS_MODES:
+        errors.append("Opción de métodos inválida.")
+    elif methods_mode == "none":
+        allowed_methods = []
+    elif methods_mode == "list":
+        allowed_methods = _lines(form.get("methods_list"))
+        if not allowed_methods:
+            # Never silently fall through to [] -- that is the opposite of
+            # "inherit", and the dangerous state has to be chosen by name.
+            errors.append(
+                'Elegiste "sólo estos métodos" pero no listaste ninguno. '
+                'Si querías deshabilitarlos todos, elegí "ningún método".'
+            )
+    return allowed_methods, errors
+
+
+def describe_methods(allowed_methods) -> str:
+    """Human form of the tri-state, for the edit history."""
+    if allowed_methods is None:
+        return "hereda"
+    if not allowed_methods:
+        return "ninguno"
+    return ", ".join(allowed_methods)
+
+
 def parse_grant_form(form) -> tuple:
     """Build a registry entry from the submitted form.
 
@@ -63,21 +97,8 @@ def parse_grant_form(form) -> tuple:
         # Mirrors _parse_grant: a typo has to be loud, never a silent downgrade.
         errors.append(f"El modo debe ser uno de {', '.join(bmya_auth.MODES)}.")
 
-    methods_mode = (form.get("methods_mode") or "inherit").strip()
-    allowed_methods = None
-    if methods_mode not in METHODS_MODES:
-        errors.append("Opción de métodos inválida.")
-    elif methods_mode == "none":
-        allowed_methods = []
-    elif methods_mode == "list":
-        allowed_methods = _lines(form.get("methods_list"))
-        if not allowed_methods:
-            # Never silently fall through to [] -- that is the opposite of
-            # "inherit", and the dangerous state has to be chosen by name.
-            errors.append(
-                'Elegiste "sólo estos métodos" pero no listaste ninguno. '
-                'Si querías deshabilitarlos todos, elegí "ningún método".'
-            )
+    allowed_methods, method_errors = parse_methods(form)
+    errors.extend(method_errors)
 
     models_mode = (form.get("models_mode") or "unrestricted").strip()
     allowed_models = None

@@ -383,6 +383,7 @@ def build_console_app(settings: Settings = None) -> FastAPI:
             status=_grant_status(grant),
             meta=app.state.meta.get(key_id),
             method_warnings=forms.method_warnings(grant.get("allowed_methods")),
+            server_methods=sorted(bmya_auth.server_allowed_methods()),
         )
 
     @app.post("/grants/{key_id}/revoke", include_in_schema=False)
@@ -454,7 +455,23 @@ def build_console_app(settings: Settings = None) -> FastAPI:
         if odoo_api not in bmya_auth.ODOO_APIS:
             return JSONResponse({"error": f"odoo_api: {odoo_api!r}"}, status_code=400)
 
+        # Methods are editable, unlike the mode. They only matter to a readwrite
+        # key (odoo_call_method is a write tool), a list can only narrow the
+        # server allowlist, and every change is written to the history with its
+        # before and after -- which is what makes widening one reviewable
+        # rather than silent.
+        edit_methods = "methods_mode" in form
+        allowed_methods = None
+        if edit_methods:
+            allowed_methods, method_errors = forms.parse_methods(form)
+            if method_errors:
+                return JSONResponse({"error": "; ".join(method_errors)}, status_code=400)
+        method_change = []
+
         class _NotFound(Exception):
+            pass
+
+        class _Invalid(Exception):
             pass
 
         def _edit(data):
@@ -472,20 +489,37 @@ def build_console_app(settings: Settings = None) -> FastAPI:
                     grant["odoo_login"] = (form.get("odoo_login") or "").strip()
                 if "odoo_api" in form:
                     grant["odoo_api"] = odoo_api
+                if edit_methods:
+                    before = grant.get("allowed_methods")
+                    if before != allowed_methods:
+                        method_change.append(
+                            f"métodos: {forms.describe_methods(before)} -> "
+                            f"{forms.describe_methods(allowed_methods)}"
+                        )
+                    grant["allowed_methods"] = allowed_methods
+                # Same last gate as minting: never write what the server would
+                # refuse to load.
+                problems = forms.validate_against_server_parser(grant)
+                if problems:
+                    raise _Invalid("; ".join(problems))
 
         try:
             bmya_registry.mutate_registry(settings.registry_file, _edit)
         except _NotFound:
             return JSONResponse({"error": "not found"}, status_code=404)
+        except _Invalid as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         except bmya_registry.RegistryFileError as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 
         try:
-            app.state.meta.append_history(key_id, identity.email, "edit")
+            app.state.meta.append_history(
+                key_id, identity.email, "edit", "; ".join(method_change)
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("Editado %s pero no se pudo escribir la metadata: %s", key_id, exc)
 
-        _audit(identity.email, "edit", key_id=key_id)
+        _audit(identity.email, "edit", key_id=key_id, change=repr("; ".join(method_change)) if method_change else None)
         return RedirectResponse(f"/grants/{key_id}", status_code=303)
 
     @app.post("/grants/probe", include_in_schema=False)
