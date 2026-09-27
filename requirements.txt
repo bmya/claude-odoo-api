@@ -1,5 +1,7 @@
 # Core dependencies
-mcp>=1.0.0
+# 2.x removed the decorator API this server is written against (Server.list_tools
+# and friends); an unpinned rebuild pulls it and the server fails at import.
+mcp>=1.28,<2
 requests>=2.31.0
 PyYAML>=6.0.1
 

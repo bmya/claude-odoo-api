@@ -9,7 +9,7 @@ description = "MCP Server for Odoo 19 External API"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.28,<2",
     "requests>=2.31.0"
 ]
 
