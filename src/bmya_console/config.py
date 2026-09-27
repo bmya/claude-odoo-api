@@ -52,6 +52,18 @@ def parse_operators(raw: str) -> dict:
     return operators
 
 
+def rejected_operator_entries(raw: str) -> int:
+    """How many non-empty entries parse_operators dropped.
+
+    Dropping them is right; reporting the result as "empty" is not. A value
+    that is present but malformed -- typically a random secret pasted where the
+    ``email:sha256`` line from tools/bmya-console-operator.py belongs -- sent
+    the operator looking for a missing variable instead of a wrong one.
+    """
+    entries = [item for item in (raw or "").split(",") if item.strip()]
+    return len(entries) - len(parse_operators(raw))
+
+
 @dataclass(frozen=True)
 class Settings:
     registry_file: str = "/app/config/bmya-api-keys.json"
@@ -67,6 +79,8 @@ class Settings:
     cookie_secure: bool = False
 
     operators: dict = field(default_factory=dict)
+    #: entries present in BMYA_CONSOLE_OPERATORS that were not email:sha256.
+    operators_rejected: int = 0
     read_only: bool = False
 
     mcp_server_url: str = ""
@@ -93,6 +107,7 @@ class Settings:
             session_max_age=int(os.getenv("BMYA_CONSOLE_SESSION_MAX_AGE", "28800")),
             cookie_secure=_flag("BMYA_CONSOLE_COOKIE_SECURE"),
             operators=parse_operators(os.getenv("BMYA_CONSOLE_OPERATORS", "")),
+            operators_rejected=rejected_operator_entries(os.getenv("BMYA_CONSOLE_OPERATORS", "")),
             read_only=_flag("BMYA_CONSOLE_READ_ONLY"),
             mcp_server_url=os.getenv("BMYA_MCP_SERVER_URL", ""),
             mcp_readyz_url=os.getenv("BMYA_CONSOLE_MCP_READYZ_URL", ""),
@@ -116,6 +131,20 @@ class Settings:
         /readyz says so.
         """
         return bool(self.operators)
+
+    @property
+    def operators_problem(self) -> str:
+        """Why nobody can log in, in terms that point at the actual fix; "" if fine."""
+        if self.operators:
+            return ""
+        if self.operators_rejected:
+            return (
+                f"BMYA_CONSOLE_OPERATORS has {self.operators_rejected} entr"
+                f"{'y' if self.operators_rejected == 1 else 'ies'} but none is "
+                "email:sha256 -- it must be the line tools/bmya-console-operator.py "
+                "prints, not a random secret or the console key itself"
+            )
+        return "BMYA_CONSOLE_OPERATORS is empty: nobody can log in"
 
     @property
     def config_dir(self) -> str:

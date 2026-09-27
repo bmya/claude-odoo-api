@@ -161,6 +161,50 @@ class TestFailClosed:
             build_console_app(broken)
 
 
+class TestMalformedOperators:
+    """A value that is present but not email:sha256 must not read as "empty".
+
+    Happened in production: a random token_urlsafe pasted into
+    BMYA_CONSOLE_OPERATORS, reported as "is empty", which sent the search to a
+    missing variable instead of a wrong one.
+    """
+
+    RANDOM_SECRET = "TJNZivdxt8cwlEctps5ulvU5Yj3ycmJCTSvPYz24YjM"
+
+    def _settings(self, console_settings, raw):
+        from bmya_console.config import parse_operators, rejected_operator_entries
+
+        return type(console_settings)(
+            **{
+                **console_settings.__dict__,
+                "operators": parse_operators(raw),
+                "operators_rejected": rejected_operator_entries(raw),
+            }
+        )
+
+    def test_a_random_secret_is_reported_as_malformed(self, console_settings):
+        settings = self._settings(console_settings, self.RANDOM_SECRET)
+        body = TestClient(build_console_app(settings)).get("/readyz").json()
+
+        (problem,) = [p for p in body["problems"] if "OPERATORS" in p]
+        assert "none is email:sha256" in problem
+        assert "bmya-console-operator.py" in problem
+        assert "is empty" not in problem
+
+    def test_empty_is_still_reported_as_empty(self, console_settings):
+        settings = self._settings(console_settings, "")
+        body = TestClient(build_console_app(settings)).get("/readyz").json()
+        assert any("is empty" in p for p in body["problems"])
+
+    def test_one_bad_entry_does_not_lock_out_the_good_one(self, console_settings):
+        good = f"{CONSOLE_OPERATOR}:{bmya_auth.hash_key(CONSOLE_KEY)}"
+        settings = self._settings(console_settings, f"{self.RANDOM_SECRET},{good}")
+
+        assert settings.operators_rejected == 1
+        assert settings.auth_ready
+        assert TestClient(build_console_app(settings)).get("/readyz").status_code == 200
+
+
 class TestSecurityHeaders:
     def test_every_response_carries_them(self, console_client):
         headers = console_client.get("/login").headers

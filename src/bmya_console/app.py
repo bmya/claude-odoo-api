@@ -76,8 +76,13 @@ def build_console_app(settings: Settings = None) -> FastAPI:
         # Fail-closed, and loud. /readyz reports 503 so a deploy with an empty
         # operator list fails visibly instead of locking everyone out quietly.
         logger.error(
-            "BMYA_CONSOLE_OPERATORS está vacío: nadie puede entrar. "
-            "La consola arranca igual para que /readyz lo reporte."
+            "%s. La consola arranca igual para que /readyz lo reporte.",
+            settings.operators_problem,
+        )
+    elif settings.operators_rejected:
+        logger.warning(
+            "BMYA_CONSOLE_OPERATORS: %d entrada(s) ignoradas por no ser email:sha256",
+            settings.operators_rejected,
         )
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -145,7 +150,7 @@ def build_console_app(settings: Settings = None) -> FastAPI:
             problems.append(f"config dir not writable: {exc}")
 
         if not settings.auth_ready:
-            problems.append("BMYA_CONSOLE_OPERATORS is empty: nobody can log in")
+            problems.append(settings.operators_problem)
 
         if problems:
             return JSONResponse({"status": "unready", "problems": problems}, status_code=503)
