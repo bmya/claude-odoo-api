@@ -1,11 +1,11 @@
-# Stack para Portainer. Sin variables de entorno de Portainer: todo hardcodeado
-# a propósito, porque este stack tiene un único destino fijo (este servidor) y
-# no hay ningún secreto que amerite mantenerlo fuera del archivo (no usamos
-# MCP_GATEWAY_TOKEN: el control de acceso es enteramente por BMYA key).
+# Stack para Portainer. Todo hardcodeado a propósito, porque este stack tiene un
+# único destino fijo (este servidor), salvo los dos secretos de la consola:
+# BMYA_CONSOLE_SESSION_SECRET y BMYA_CONSOLE_OPERATORS van en "Environment
+# variables" del stack en Portainer, nunca en este archivo versionado. (No
+# usamos MCP_GATEWAY_TOKEN: el control de acceso es enteramente por BMYA key.)
 #
 # Para cambiar algo (ODOO_MCP_READONLY, la imagen, etc.): editalo directo acá
-# en el editor de stack de Portainer y "Update the stack" — no hace falta
-# tocar ninguna variable aparte.
+# en el editor de stack de Portainer y "Update the stack".
 #
 # Sin `build:` a propósito: no baja de ghcr.io (el paquete queda privado por
 # default hasta que lo hagas público en GitHub), se buildea localmente en este
@@ -14,6 +14,7 @@
 #
 #   git clone https://github.com/bmya/claude-odoo-api.git && cd claude-odoo-api
 #   docker build -t ghcr.io/bmya/odoo-mcp-server:latest .
+#   docker build -f Dockerfile.console -t ghcr.io/bmya/bmya-console:latest .
 #
 # Importante: en Portainer, al desplegar/actualizar este stack, dejar
 # DESTILDADA la opción "Always pull the image" — si está tildada, Portainer va
@@ -36,6 +37,9 @@ services:
       # Directorio, no archivo: un bind mount de archivo suelto fija el inode y
       # las revocaciones de keys nunca aplicarían.
       - "/root/odoo-mcp/deploy/config:/app/config:ro"
+      # Bitácora de uso: una línea JSON por llamada a tool. El filesystem sigue
+      # read_only y config sigue :ro; esto es lo único escribible.
+      - "bmya-usage:/app/var/usage"
     environment:
       MCP_TRANSPORT: http
       MCP_HTTP_HOST: 0.0.0.0
@@ -44,6 +48,7 @@ services:
       # (El default del código ya es "1"; se deja igual por claridad.)
       BMYA_AUTH_ENABLED: "1"
       BMYA_API_KEYS_FILE: /app/config/bmya-api-keys.json
+      BMYA_USAGE_DIR: /app/var/usage
 
       # Instancias reales conocidas: bmya.cloud/.cl propias, .odoo.com para las
       # que corren en Odoo Online/Odoo.sh (ej. staging). Ajustar si sumás una
@@ -79,3 +84,55 @@ services:
         max-size: "10m"
         max-file: "5"
     restart: unless-stopped
+
+  # Consola web para emitir y revocar keys. Se entra por túnel:
+  #   ssh -L 8081:10.0.0.14:8081 barbol   ->   http://localhost:8081
+  bmya-console:
+    image: ghcr.io/bmya/bmya-console:latest
+    container_name: bmya-console
+    ports:
+      # Sólo la IP de VLAN, igual que odoo-api. BARBOL no tiene firewall.
+      - "10.0.0.14:8081:8081"
+    volumes:
+      # El MISMO directorio que odoo-api, pero :rw. El directorio tiene que ser
+      # de 1000:1000: la consola escribe con tempfile + os.replace y un .lock
+      # al lado, y con el directorio de otro dueño falla la primera emisión.
+      - "/root/odoo-mcp/deploy/config:/app/config:rw"
+      - "bmya-usage:/app/var/usage:ro"
+    user: "1000:1000"
+    environment:
+      BMYA_ALLOWED_URL_SUFFIXES: ".bmya.cloud,.bmya.cl,.odoo.com"
+      BMYA_API_KEYS_FILE: /app/config/bmya-api-keys.json
+      BMYA_KEYS_BACKEND: file
+      BMYA_CONSOLE_META_FILE: /app/config/bmya-console-meta.json
+      BMYA_CONSOLE_USAGE_DIR: /app/var/usage
+      BMYA_CONSOLE_HTTP_HOST: 0.0.0.0
+      BMYA_CONSOLE_HTTP_PORT: "8081"
+      # Desde "Environment variables" del stack. Sin el secreto no arranca;
+      # con OPERATORS vacío no entra nadie (nunca "entra cualquiera").
+      BMYA_CONSOLE_SESSION_SECRET: "${BMYA_CONSOLE_SESSION_SECRET}"
+      BMYA_CONSOLE_OPERATORS: "${BMYA_CONSOLE_OPERATORS}"
+      # 0 mientras sea HTTP plano por VLAN: una cookie Secure no viaja sin TLS
+      # y el login entra en loop. A 1 el día que la sirva Traefik.
+      BMYA_CONSOLE_COOKIE_SECURE: "0"
+      BMYA_CONSOLE_READ_ONLY: "0"
+      BMYA_CONSOLE_MCP_READYZ_URL: "http://10.0.0.14:8080/readyz"
+      BMYA_MCP_SERVER_URL: "https://mcp.bmya.cloud/mcp/"
+      # Deliberadamente NO declarada, igual que en odoo-api:
+      #   ODOO_MCP_ALLOWED_METHODS
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    restart: unless-stopped
+
+volumes:
+  bmya-usage:
