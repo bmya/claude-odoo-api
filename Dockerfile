@@ -37,8 +37,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libwebp7 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user for security
-RUN useradd -m -u 1000 odoo && chown -R odoo:odoo /app
+# Create non-root user for security.
+# /app/var/usage has to exist in the image, owned by odoo: a named volume
+# mounted there copies the directory's ownership only if the image has it.
+# Without it Docker creates the mountpoint root:root 755, the server (uid 1000)
+# cannot write, and every usage line is dropped -- silently, by design, since
+# metering never fails a call.
+RUN useradd -m -u 1000 odoo \
+    && mkdir -p /app/var/usage \
+    && chown -R odoo:odoo /app
 
 # Copy Python dependencies from builder to odoo user home
 COPY --from=builder --chown=odoo:odoo /root/.local /home/odoo/.local
