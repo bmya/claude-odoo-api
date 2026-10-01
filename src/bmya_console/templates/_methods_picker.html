@@ -1,0 +1,30 @@
+{#- Methods tri-state + tag picker, shared by minting and editing.
+    Expects: server_methods (sorted list), chosen (list), mode_value ("inherit"|"none"|"list").
+    Without JS the checkboxes below are the control; console.js turns them into
+    a menu plus removable tags. Methods the server does not allow can only show
+    up here because a grant already had them: they stay, flagged, so saving an
+    unrelated field never drops them silently. -#}
+<fieldset class="methods" data-methods>
+  <legend>Métodos de negocio (<code>odoo_call_method</code>)</legend>
+  <label class="choice"><input type="radio" name="methods_mode" value="inherit" {% if mode_value == "inherit" %}checked{% endif %}>
+    <span><strong>Todos los que permite el servidor</strong>
+    <span class="hint">Se guarda <code>null</code>: sigue sola cualquier cambio futuro en la lista del servidor. Hoy:
+      {% for m in server_methods %}<code>{{ m }}</code>{% if not loop.last %}, {% endif %}{% else %}ninguno{% endfor %}</span></span></label>
+  <label class="choice"><input type="radio" name="methods_mode" value="list" {% if mode_value == "list" %}checked{% endif %}>
+    <span><strong>Sólo los que elija</strong>
+    <span class="hint">Elegís entre los que el servidor permite. Para ofrecer uno nuevo hay que agregarlo
+      a <code>ODOO_MCP_ALLOWED_METHODS</code> en el stack.</span></span></label>
+  <div class="picker" data-picker>
+    {% for m in server_methods %}
+    <label class="pick"><input type="checkbox" name="methods" value="{{ m }}" {% if m in chosen %}checked{% endif %}> <code>{{ m }}</code></label>
+    {% endfor %}
+    {% for m in chosen if m not in server_methods %}
+    <label class="pick stale" title="El servidor no lo permite: no hace nada hasta que se agregue a ODOO_MCP_ALLOWED_METHODS">
+      <input type="checkbox" name="methods" value="{{ m }}" checked> <code>{{ m }}</code> (el servidor no lo permite)</label>
+    {% endfor %}
+  </div>
+  <label class="choice"><input type="radio" name="methods_mode" value="none" {% if mode_value == "none" %}checked{% endif %}>
+    <span><strong>Ninguno</strong>
+    <span class="hint">Se guarda <code>[]</code>: <code>odoo_call_method</code> queda deshabilitado.</span></span></label>
+
+</fieldset>

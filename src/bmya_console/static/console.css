@@ -79,3 +79,21 @@ th { color: var(--muted); font-weight: 600; }
 
 textarea.secret { width: 100%; min-height: 4rem; font-size: .9em; }
 pre.snippet { background: #11151b; color: #e6edf3; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: .82em; }
+
+.picker { margin: .5rem 0 .25rem 1.5rem; }
+.picker .pick { display: block; margin: .2rem 0; }
+.picker .pick.stale code, .tag.stale { background: var(--warn-bg); }
+.tags { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .5rem; }
+.tag {
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .15rem .25rem .15rem .6rem; border: 1px solid var(--line); border-radius: 999px;
+  background: #eef4fb; font-size: .88em;
+}
+.tag.stale { border-color: var(--warn-line); }
+.tag .x {
+  background: none; border: 0; color: var(--muted); padding: 0 .35rem;
+  font-size: 1.1em; line-height: 1; cursor: pointer;
+}
+.tag .x:hover { color: var(--danger); }
+select.add-method { max-width: 26rem; }
+[hidden] { display: none !important; }

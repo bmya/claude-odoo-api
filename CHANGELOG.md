@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased] - 2026-10-01 — Consola: selector de métodos
+
+### Changed
+- **Los métodos de una key se eligen de un menú, como tags.** El cuadro de texto
+  libre dejaba escribir cualquier `modelo.metodo`, incluso uno que el servidor no
+  permite y que la intersección con `ODOO_MCP_ALLOWED_METHODS` descartaba sin
+  aviso (lo que le pasó a grokbot de APV con `purchase.order.button_confirm`).
+  Ahora el menú ofrece sólo los que permite el servidor, y cada uno elegido queda
+  como tag con su ✕. Si una key ya tenía métodos fuera de esa lista, se muestran
+  como tags en amarillo para que guardar otro campo no los borre en silencio.
+  Sin JavaScript se ve como una lista de casillas. `methods_list` se sigue
+  aceptando en el POST.
+- **Los métodos sólo existen para keys de lectura y escritura.** En "Emitir", la
+  sección se oculta con "Sólo lectura" y la key se guarda con `null`. En
+  "Editar", una key de sólo lectura no muestra la sección, y un POST que cambie
+  sus métodos se rechaza con 400.
+
 ## [Unreleased] - 2026-09-27 — Odoo 17 y 18 por JSON-RPC
 
 ### Added

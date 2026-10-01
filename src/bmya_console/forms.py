@@ -32,11 +32,27 @@ def _lines(raw):
     return items
 
 
+def selected_methods(form) -> list:
+    """The methods picked in the form, in order and without repeats.
+
+    The picker posts one ``methods`` value per tag. ``methods_list`` is the old
+    textarea, still accepted so a scripted POST written against it keeps
+    working.
+    """
+    picked = list(form.getlist("methods")) if hasattr(form, "getlist") else []
+    picked += _lines(form.get("methods_list"))
+    seen = []
+    for m in (m.strip() for m in picked):
+        if m and m not in seen:
+            seen.append(m)
+    return seen
+
+
 def parse_methods(form) -> tuple:
     """``(allowed_methods, errors)`` from the methods tri-state.
 
     Shared by minting and editing so both enforce the same rule: "sólo estos"
-    with an empty box is an error, never a silent ``[]``.
+    with nothing picked is an error, never a silent ``[]``.
     """
     errors = []
     methods_mode = (form.get("methods_mode") or "inherit").strip()
@@ -46,7 +62,7 @@ def parse_methods(form) -> tuple:
     elif methods_mode == "none":
         allowed_methods = []
     elif methods_mode == "list":
-        allowed_methods = _lines(form.get("methods_list"))
+        allowed_methods = selected_methods(form)
         if not allowed_methods:
             # Never silently fall through to [] -- that is the opposite of
             # "inherit", and the dangerous state has to be chosen by name.
@@ -97,8 +113,12 @@ def parse_grant_form(form) -> tuple:
         # Mirrors _parse_grant: a typo has to be loud, never a silent downgrade.
         errors.append(f"El modo debe ser uno de {', '.join(bmya_auth.MODES)}.")
 
-    allowed_methods, method_errors = parse_methods(form)
-    errors.extend(method_errors)
+    # odoo_call_method is a write tool: a readonly key never reaches it, so
+    # whatever the form says about methods is moot and the grant inherits.
+    allowed_methods = None
+    if mode == bmya_auth.MODE_RW:
+        allowed_methods, method_errors = parse_methods(form)
+        errors.extend(method_errors)
 
     models_mode = (form.get("models_mode") or "unrestricted").strip()
     allowed_models = None

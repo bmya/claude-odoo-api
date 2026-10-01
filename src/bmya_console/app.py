@@ -288,6 +288,8 @@ def build_console_app(settings: Settings = None) -> FastAPI:
                 "grants_new.html",
                 errors=errs,
                 form=dict(form),
+                # dict(form) keeps only the last of the repeated "methods".
+                chosen_methods=forms.selected_methods(form),
                 server_methods=server_methods,
             )
             response.status_code = 400
@@ -479,6 +481,12 @@ def build_console_app(settings: Settings = None) -> FastAPI:
             if not matches:
                 raise _NotFound()
             for grant in matches:
+                if edit_methods and grant.get("mode") != bmya_auth.MODE_RW:
+                    # Rejected, not ignored, like the immutable fields: the
+                    # form never offers this, so whoever sent it is confused.
+                    raise _Invalid(
+                        "La key es de sólo lectura: no usa odoo_call_method, no hay métodos que editar."
+                    )
                 grant["label"] = (form.get("label") or "").strip()
                 grant["notes"] = (form.get("notes") or "").strip()
                 grant["expires_at"] = expires_at

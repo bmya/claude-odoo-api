@@ -63,20 +63,8 @@
     <span class="hint">Sólo cosmético: es el nombre del servidor MCP en la configuración del cliente.</span>
   </label>
 
-  <fieldset>
-    <legend>Métodos de negocio (<code>odoo_call_method</code>)</legend>
-    <label class="choice"><input type="radio" name="methods_mode" value="inherit" {% if form.methods_mode != 'none' and form.methods_mode != 'list' %}checked{% endif %}>
-      <span><strong>Hereda la lista del servidor</strong>
-      <span class="hint">Se guarda <code>null</code>. Hoy el servidor permite:
-        {% for m in server_methods %}<code>{{ m }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</span></span></label>
-    <label class="choice"><input type="radio" name="methods_mode" value="none" {% if form.methods_mode == 'none' %}checked{% endif %}>
-      <span><strong>Ningún método</strong>
-      <span class="hint">Se guarda <code>[]</code>. <code>odoo_call_method</code> queda deshabilitado por completo. No es lo mismo que heredar.</span></span></label>
-    <label class="choice"><input type="radio" name="methods_mode" value="list" {% if form.methods_mode == 'list' %}checked{% endif %}>
-      <span><strong>Sólo estos</strong>
-      <span class="hint">Uno por línea, formato <code>modelo.metodo</code>. Sólo puede restringir: se intersecta con la lista del servidor.</span></span></label>
-    <textarea name="methods_list" placeholder="account.move.action_post">{{ form.methods_list or '' }}</textarea>
-  </fieldset>
+  {% set mode_value = form.methods_mode if form.methods_mode in ("none", "list") else "inherit" %}
+  {% with chosen = chosen_methods or [] %}{% include "_methods_picker.html" %}{% endwith %}
 
   <fieldset>
     <legend>Modelos alcanzables</legend>

@@ -165,6 +165,7 @@ class TestMethodsTriState:
     can express only two of the three states."""
 
     def _written(self, client, settings, **overrides):
+        overrides.setdefault("mode", "readwrite")
         assert mint(client, **overrides).status_code == 200
         return grants_of(settings)[0]
 
@@ -192,7 +193,7 @@ class TestMethodsTriState:
         """The ambiguity test. An empty box must never silently become [], which
         is the exact opposite of 'inherit'."""
         before = open(console_settings.registry_file, "rb").read()
-        response = mint(logged_in_client, methods_mode="list", methods_list="   ")
+        response = mint(logged_in_client, mode="readwrite", methods_mode="list", methods_list="   ")
         assert response.status_code == 400
         assert "ningún método" in response.text
         assert open(console_settings.registry_file, "rb").read() == before
@@ -207,10 +208,47 @@ class TestMethodsTriState:
     def test_unknown_methods_are_flagged_not_rejected(self, logged_in_client):
         """effective_allowed_methods intersects with the server list, so a
         method absent from it is dead on arrival -- worth a warning, not a 400."""
-        response = mint(logged_in_client, methods_mode="list", methods_list="res.partner.inventado")
+        response = mint(
+            logged_in_client, mode="readwrite", methods_mode="list", methods_list="res.partner.inventado"
+        )
         assert response.status_code == 200
         assert "res.partner.inventado" in response.text
         assert "intersección" in response.text
+
+    def test_the_picker_posts_one_value_per_tag(self, logged_in_client, console_settings):
+        grant = self._written(
+            logged_in_client,
+            console_settings,
+            methods_mode="list",
+            methods=["sale.order.action_confirm", "account.move.action_post", "sale.order.action_confirm"],
+        )
+        assert grant["allowed_methods"] == ["sale.order.action_confirm", "account.move.action_post"]
+
+    def test_the_picker_offers_exactly_the_server_list(self, logged_in_client):
+        page = logged_in_client.get("/grants/new").text
+        for m in bmya_auth.server_allowed_methods():
+            assert f'name="methods" value="{m}"' in page
+        assert "<textarea name=\"methods_list\"" not in page
+
+    def test_a_readonly_key_ignores_methods_and_inherits(self, logged_in_client, console_settings):
+        """odoo_call_method is a write tool: for a readonly key the section is
+        moot, and an empty 'sólo estos' must not block minting it."""
+        grant = self._written(
+            logged_in_client, console_settings, mode="readonly", methods_mode="list", methods_list=""
+        )
+        assert grant["allowed_methods"] is None
+
+    def test_a_failed_mint_keeps_the_picked_tags(self, logged_in_client):
+        response = mint(
+            logged_in_client,
+            mode="readwrite",
+            database="",
+            methods_mode="list",
+            methods=["account.move.action_post", "sale.order.action_confirm"],
+        )
+        assert response.status_code == 400
+        assert 'value="account.move.action_post" checked' in response.text
+        assert 'value="sale.order.action_confirm" checked' in response.text
 
 
 class TestRevoke:
@@ -374,6 +412,28 @@ class TestEditMethods:
 
         grant = bmya_auth.resolve_grant({"x-bmya-api-key": plaintext})
         assert grant.allowed_methods == frozenset()
+
+    def test_methods_the_server_dropped_stay_visible_as_stale_tags(
+        self, logged_in_client, console_settings
+    ):
+        """Saving an unrelated field must not silently drop them."""
+        key_id = self._mint_rw(
+            logged_in_client, console_settings,
+            methods_mode="list", methods_list="account.move.action_post\npurchase.order.button_confirm",
+        )
+        page = logged_in_client.get(f"/grants/{key_id}").text
+        assert 'value="purchase.order.button_confirm" checked' in page
+        assert "el servidor no lo permite" in page
+
+    def test_a_readonly_key_has_no_methods_to_edit(self, logged_in_client, console_settings):
+        mint(logged_in_client)
+        key_id = grants_of(console_settings)[0]["key_id"]
+        assert 'name="methods_mode"' not in logged_in_client.get(f"/grants/{key_id}").text
+
+        before = open(console_settings.registry_file, "rb").read()
+        response = self._edit(logged_in_client, key_id, methods_mode="none")
+        assert response.status_code == 400
+        assert open(console_settings.registry_file, "rb").read() == before
 
     def test_saving_other_fields_leaves_methods_alone(self, logged_in_client, console_settings):
         """Old clients of the edit route send no methods_mode at all."""
