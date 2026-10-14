@@ -48,10 +48,21 @@ el MCP no la borra.
 2. **Config.** Copiar `local/odoo.env.example` a `local/odoo.env` (está en el
    gitignore) y completar `ODOO_API_KEY` y `ODOO_MASTER_PASSWORD` (el
    `admin_passwd` del `odoo.conf`).
-3. **Imagen.** Desde la raíz del worktree:
+3. **Imagen.** Desde `local/`, con el compose:
    ```bash
-   docker build -t bmya/odoo-mcp-server:local .
+   docker compose build mcp-odoo-local
    ```
+   O sin compose, desde la raíz del worktree:
+   `docker build -t bmya/odoo-mcp-server:local .`
+
+   El compose (`local/docker-compose.yml`) no levanta un servicio: la app
+   lanza su propio `docker run`. Sirve para construir la imagen y para probarla
+   a mano con los mismos montajes y variables:
+   ```bash
+   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' | docker compose run --rm -T mcp-odoo-local
+   ```
+   El servicio está en el perfil `manual`, así que hay que nombrarlo: un
+   `docker compose build` o `up` a secas lo saltea.
 4. **Registro en la app de Claude.** Agregar en
    `~/Library/Application Support/Claude/claude_desktop_config.json` y reiniciar
    la app:

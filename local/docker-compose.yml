@@ -1,0 +1,37 @@
+# mcp-odoo-local: build and manual testing of the local MCP.
+#
+# Not a long-running service: the Claude app launches its own
+# `docker run -i --rm ... bmya/odoo-mcp-server:local` and talks to it over
+# stdio. This file only builds that image and runs it with the same mounts and
+# variables, for testing from a terminal. Run it from this directory (local/),
+# which has no .env, so Compose never reads the credentials as its own.
+#
+#   docker compose build mcp-odoo-local        # build bmya/odoo-mcp-server:local
+#   docker compose run --rm -T mcp-odoo-local  # stdio server; pipe JSON-RPC into it
+#
+# The service is named explicitly because it sits in the "manual" profile (see
+# below): a bare `docker compose build` or `up` skips it.
+
+services:
+  mcp-odoo-local:
+    image: bmya/odoo-mcp-server:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # stdio transport: stdin open, no TTY (a TTY would mangle the JSON-RPC).
+    stdin_open: true
+    tty: false
+    volumes:
+      # The directory, never the single file: editors save by rename, and a
+      # single-file bind mount would keep the old inode, so edits would never
+      # reach the container. The server re-reads odoo.env when it changes.
+      - ".:/app/local:ro"
+    environment:
+      MCP_TRANSPORT: stdio
+      MCP_SERVER_NAME: mcp-odoo-local
+      ODOO_CONFIG_FILE: /app/local/odoo.env
+      ODOO_MCP_ALLOWED_METHODS: "*"
+    profiles:
+      # Keeps `docker compose up` from starting a stdio server with nothing
+      # attached to it; `build` and `run` work when the service is named.
+      - manual
