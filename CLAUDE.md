@@ -189,6 +189,17 @@ Configuration loading:
 - `list_available_companies()` returns list of configured company names
 - Environment variable `ODOO_CONFIG_FILE` can override default `.env` path
 
+### Local demo mode (branch `local`, MCP `mcp-odoo-local`)
+
+Stdio-only extensions for building client demos on a local Odoo (see [docs/local-demo.md](docs/local-demo.md)); none of it changes the HTTP/grant path:
+
+- `load_company_configs()` re-reads the INI when its `(mtime_ns, size)` changes, keeping the last good snapshot on a bad edit, and closes cached clients on change. The config's `[DEFAULT]` section is parsed into `company_defaults`.
+- `resolve_company_config(name)`: section name → section whose `ODOO_DATABASE` is `name` (a read-only match wins) → `[DEFAULT]` instance with `database=name`, validated against the instance's `/web/database/list` (`list_instance_databases`, cached `ODOO_DB_LIST_TTL`). `odoo_clients` is keyed by the resolved config, not by the name used.
+- Per-section `ODOO_MODE=readonly` sets `client.mode`; `_dispatch_tool` refuses `WRITE_TOOLS` on such a client.
+- `odoo_call_method`'s stdio allowlist accepts fnmatch patterns (`*`, `sale.order.*`) via `_method_allowed`.
+- `LOCAL_TOOLS` (`odoo_list_databases`, `odoo_duplicate_database`) are hidden and refused over HTTP. Duplication posts the form endpoint `/web/database/duplicate` (Odoo 20 removed the `db` JSON-RPC service) with a plain `requests.post`, deliberately outside the retry adapter: a retried POST could start a second copy.
+- The config is mounted as the **directory** `local/` (`local/odoo.env`, gitignored); Docker Desktop shows an edit inside the container after ~1 s.
+
 ### Transports: stdio (local) vs HTTP (remote, multi-tenant)
 
 The server supports two transports, selected by `MCP_TRANSPORT` (default `stdio`):

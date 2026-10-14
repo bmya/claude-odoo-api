@@ -19,7 +19,10 @@ from odoo_mcp_server import (
     list_available_companies
 )
 
-# The full tool set the server exposes.
+# Database-management tools, only listed on a local (stdio) server.
+LOCAL_TOOLS = {"odoo_list_databases", "odoo_duplicate_database"}
+
+# The full tool set the server exposes over HTTP.
 EXPECTED_TOOLS = {
     "odoo_list_companies",
     "odoo_search_read",
@@ -385,8 +388,9 @@ class TestMCPToolIntegration:
         tools = await list_tools()
 
         # Compare the whole set rather than a bare count, so a rename fails
-        # loudly instead of a counter silently drifting.
-        assert {tool.name for tool in tools} == EXPECTED_TOOLS
+        # loudly instead of a counter silently drifting. Under stdio the
+        # database-management tools are listed too.
+        assert {tool.name for tool in tools} == EXPECTED_TOOLS | LOCAL_TOOLS
 
     @pytest.mark.asyncio
     async def test_call_list_companies(self, temp_env_file):

@@ -222,6 +222,16 @@ environment:
   - ODOO_MCP_READONLY=1
 ```
 
+## Local demo mode (`mcp-odoo-local`)
+
+On the `local` branch the stdio server doubles as a demo builder for a local
+Odoo: with `ODOO_URL` + `ODOO_API_KEY` in the config's `[DEFAULT]` section, any
+database the instance lists is usable by name as `company`, the config is
+re-read when it changes, `ODOO_MODE=readonly` protects a section (e.g. the
+template), `ODOO_MCP_ALLOWED_METHODS=*` allows any method, and two stdio-only
+tools manage databases: `odoo_list_databases` and `odoo_duplicate_database`.
+See [docs/local-demo.md](docs/local-demo.md).
+
 ## Remote HTTP mode (shared, multi-tenant)
 
 Besides the local stdio transport described below, the server can run once and be

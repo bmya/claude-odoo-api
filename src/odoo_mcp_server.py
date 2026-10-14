@@ -9,8 +9,10 @@ and image processing capabilities.
 """
 
 import os
+import re
 import json
 import asyncio
+import fnmatch
 import hashlib
 import logging
 import time
@@ -49,6 +51,16 @@ ODOO_VERSION_TIMEOUT = float(os.getenv("ODOO_VERSION_TIMEOUT", "5"))
 # JSON-RPC (Odoo < 19): how long a rejected login+key is answered from memory
 # instead of retried. See OdooLegacyClient._authenticate.
 ODOO_AUTH_FAILURE_TTL = int(os.getenv("ODOO_AUTH_FAILURE_TTL", "60"))
+
+# Local mode (stdio): database listing and duplication on the config's instance.
+# A listing is trusted this long, so a database name can be validated on every
+# call without asking Odoo each time; duplication copies a whole database plus
+# its filestore, hence the generous timeout.
+ODOO_DB_LIST_TTL = float(os.getenv("ODOO_DB_LIST_TTL", "10"))
+ODOO_DB_OPERATION_TIMEOUT = float(os.getenv("ODOO_DB_OPERATION_TIMEOUT", "600"))
+
+# Name announced to MCP clients, e.g. "mcp-odoo-local" for the local demo setup.
+MCP_SERVER_NAME = os.getenv("MCP_SERVER_NAME", "odoo-mcp-server")
 
 # Transport: "stdio" (default, local one-process-per-user) or "http"
 # (Streamable HTTP, shareable over the network). In HTTP mode credentials are
@@ -101,6 +113,8 @@ class OdooClient:
         self.url = url.rstrip("/")
         self.database = database
         self.api_key = api_key
+        # Per-section ODOO_MODE (stdio only); set by get_odoo_client.
+        self.mode = bmya.MODE_RW
 
         # Create session with retry logic
         self.session = self._create_session()
@@ -415,13 +429,25 @@ def _format_call_method_result(result: Any) -> str:
 
 
 # Initialize the MCP server
-app = Server("odoo-mcp-server")
+app = Server(MCP_SERVER_NAME)
 
 # Store multiple company configurations
 company_configs: Dict[str, Dict[str, str]] = {}
 
-# Clients built from the stdio .env sections, keyed by company name.
-odoo_clients: Dict[str, OdooClient] = {}
+# The [DEFAULT] section of the config file, parsed like a section. When it names
+# an instance (ODOO_URL + ODOO_API_KEY) any database on that instance can be
+# used by name without a section of its own -- the local demo workflow, where
+# every database is cloned from a template carrying the same API key.
+company_defaults: Dict[str, str] = {}
+
+# (path, mtime_ns, size) of the config file the current snapshot came from, so
+# an edit is picked up on the next call without restarting the server.
+_config_stamp: Optional[tuple] = None
+
+# Clients built from the stdio .env sections, keyed by the resolved
+# (url, database, api_key, login, api, mode) -- not by the name the caller
+# used, which can be a section or a bare database name.
+odoo_clients: Dict[tuple, OdooClient] = {}
 
 # Clients built from per-request credentials, keyed by a hash of those
 # credentials. Kept separate from odoo_clients so company names and credential
@@ -430,56 +456,204 @@ ODOO_CLIENT_CACHE_MAX = int(os.getenv("ODOO_CLIENT_CACHE_MAX", "256"))
 _http_clients: "OrderedDict[str, OdooClient]" = OrderedDict()
 
 
+def _config_signature(path: str) -> Optional[tuple]:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (path, stat.st_mtime_ns, stat.st_size)
+
+
+def _parse_mode(value: str, where: str) -> str:
+    mode = (value or bmya.MODE_RW).strip().lower()
+    if mode not in bmya.MODES:
+        raise ValueError(f"ODOO_MODE must be one of {', '.join(bmya.MODES)} in {where}, got {value!r}")
+    return mode
+
+
+def _config_entry(section, where: str) -> Dict[str, str]:
+    return {
+        'url': section.get('ODOO_URL', ''),
+        'database': section.get('ODOO_DATABASE', ''),
+        'api_key': section.get('ODOO_API_KEY', ''),
+        'company_id': section.get('COMPANY_ID', '1'),
+        # Only for Odoo < 19 (JSON-RPC); see OdooLegacyClient.
+        'login': section.get('ODOO_LOGIN', ''),
+        'api': section.get('ODOO_API', bmya.ODOO_API_AUTO),
+        'mode': _parse_mode(section.get('ODOO_MODE', ''), where),
+        # Only for odoo_duplicate_database.
+        'master_password': section.get('ODOO_MASTER_PASSWORD', ''),
+    }
+
+
+def _parse_config_file(path: str) -> tuple:
+    """Parse the INI config into ``(sections, defaults)``."""
+    # No interpolation: an API key or master password may contain '%'. Inline
+    # comments need leading whitespace, so a '#' inside a key is kept.
+    config = ConfigParser(interpolation=None, inline_comment_prefixes=("#", ";"))
+    config.read(path)
+
+    defaults = _config_entry(config[config.default_section], "[DEFAULT]")
+    sections = {}
+    for name in config.sections():
+        entry = _config_entry(config[name], f"[{name}]")
+        missing = [key for key in ('url', 'database', 'api_key') if not entry[key]]
+        if missing:
+            raise ValueError(
+                f"Section [{name}] of {path} is missing "
+                + ", ".join(f"ODOO_{key.upper()}" for key in missing)
+            )
+        sections[name] = entry
+
+    if not sections and not (defaults['url'] and defaults['api_key']):
+        raise ValueError("No company configurations found in .env file")
+    return sections, defaults
+
+
+def _close_clients() -> None:
+    for client in odoo_clients.values():
+        try:
+            client.session.close()
+        except Exception:
+            logger.debug("Could not close a client session", exc_info=True)
+    odoo_clients.clear()
+
+
 def load_company_configs() -> Dict[str, Dict[str, str]]:
-    """Load company configurations from .env file"""
-    if company_configs:
+    """Load company configurations from the .env file, re-reading it when it changes.
+
+    A file that becomes unreadable or invalid keeps the last good snapshot (with
+    an ERROR in the log) rather than breaking every call mid-demo.
+    """
+    global company_configs, company_defaults, _config_stamp
+
+    stamp = _config_signature(CONFIG_FILE)
+    have_snapshot = (
+        _config_stamp is not None
+        and _config_stamp[0] == CONFIG_FILE
+        and bool(company_configs or company_defaults)
+    )
+    if have_snapshot and stamp == _config_stamp:
         return company_configs
 
-    if not os.path.exists(CONFIG_FILE):
+    if stamp is None:
+        if have_snapshot:
+            logger.error(f"Configuration file {CONFIG_FILE} disappeared; keeping the last loaded one")
+            return company_configs
         raise ValueError(f"Configuration file not found: {CONFIG_FILE}")
 
-    config = ConfigParser()
-    config.read(CONFIG_FILE)
+    try:
+        sections, defaults = _parse_config_file(CONFIG_FILE)
+    except Exception:
+        if have_snapshot:
+            logger.error(
+                f"Could not reload {CONFIG_FILE}; keeping the last loaded configuration",
+                exc_info=True,
+            )
+            return company_configs
+        raise
 
-    for section in config.sections():
-        company_configs[section] = {
-            'url': config.get(section, 'ODOO_URL'),
-            'database': config.get(section, 'ODOO_DATABASE'),
-            'api_key': config.get(section, 'ODOO_API_KEY'),
-            'company_id': config.get(section, 'COMPANY_ID', fallback='1'),
-            # Only for Odoo < 19 (JSON-RPC); see OdooLegacyClient.
-            'login': config.get(section, 'ODOO_LOGIN', fallback=''),
-            'api': config.get(section, 'ODOO_API', fallback=bmya.ODOO_API_AUTO),
-        }
-
-    if not company_configs:
-        raise ValueError("No company configurations found in .env file")
+    if sections != company_configs or defaults != company_defaults:
+        _close_clients()
+    company_configs = sections
+    company_defaults = defaults
+    _config_stamp = stamp
 
     logger.info(f"Loaded {len(company_configs)} company configurations: {list(company_configs.keys())}")
+    if company_defaults['url'] and company_defaults['api_key']:
+        logger.info(f"Any database on {company_defaults['url']} is usable by name ([DEFAULT])")
     return company_configs
 
 
+# url -> (expires_at, sorted database names)
+_db_list_cache: Dict[str, tuple] = {}
+
+
+def list_instance_databases(url: str, *, fresh: bool = False) -> Optional[list]:
+    """The databases an instance lists, or None when it will not say.
+
+    /web/database/list is public and already narrowed by the instance's
+    dbfilter, so it is exactly the set a request can reach. None (list_db off,
+    instance down) means "cannot validate", not "no databases".
+    """
+    url = url.rstrip("/")
+    now = time.time()
+    hit = _db_list_cache.get(url)
+    if not fresh and hit is not None and hit[0] > now:
+        return hit[1]
+    try:
+        response = requests.post(
+            f"{url}/web/database/list",
+            json={"jsonrpc": "2.0", "method": "call", "params": {}},
+            timeout=ODOO_VERSION_TIMEOUT,
+            allow_redirects=False,
+        )
+        response.raise_for_status()
+        answer = response.json()
+        if "error" in answer:
+            raise ValueError(answer["error"].get("message") or answer["error"])
+        databases = sorted(answer["result"])
+    except Exception as exc:  # noqa: BLE001 - any failure means "could not tell"
+        logger.warning(f"Could not list the databases of {url}: {exc}")
+        return None
+    _db_list_cache[url] = (now + ODOO_DB_LIST_TTL, databases)
+    return databases
+
+
+def resolve_company_config(name: str) -> Dict[str, str]:
+    """The config for ``name``: a section, a section's database, or [DEFAULT].
+
+    Resolution order:
+      1. a section called ``name``;
+      2. a section whose ODOO_DATABASE is ``name`` -- a read-only one wins, so a
+         template protected by its section stays protected when named by
+         database;
+      3. the [DEFAULT] instance with ODOO_DATABASE=``name``, after checking the
+         instance actually lists that database.
+    """
+    configs = load_company_configs()
+    if name in configs:
+        return configs[name]
+
+    by_database = [entry for entry in configs.values() if entry['database'] == name]
+    if by_database:
+        return min(by_database, key=lambda entry: entry['mode'] != bmya.MODE_RO)
+
+    defaults = company_defaults
+    if defaults.get('url') and defaults.get('api_key'):
+        databases = list_instance_databases(defaults['url'])
+        if databases is not None and name not in databases:
+            raise ValueError(
+                f"Company or database '{name}' not found. "
+                f"Sections: {', '.join(configs) or '(none)'}. "
+                f"Databases on {defaults['url']}: {', '.join(databases) or '(none)'}"
+            )
+        return {**defaults, 'database': name}
+
+    available = ", ".join(configs.keys())
+    raise ValueError(f"Company '{name}' not found. Available companies: {available}")
+
+
 def get_odoo_client(company: str) -> OdooClient:
-    """Get or create Odoo client instance for specific company"""
-    if company not in odoo_clients:
-        configs = load_company_configs()
+    """Get or create the Odoo client for a section name or a database name."""
+    config = resolve_company_config(company)
+    key = tuple(config[field] for field in ('url', 'database', 'api_key', 'login', 'api', 'mode'))
 
-        if company not in configs:
-            available = ", ".join(configs.keys())
-            raise ValueError(f"Company '{company}' not found. Available companies: {available}")
-
-        config = configs[company]
-        odoo_clients[company] = _build_client(
+    client = odoo_clients.get(key)
+    if client is None:
+        client = _build_client(
             config['url'],
             config['database'],
             config['api_key'],
             login=config.get('login', ''),
             api=_select_api(config['url'], config.get('api', bmya.ODOO_API_AUTO)),
-            login_hint=f"add ODOO_LOGIN to the [{company}] section of the .env",
+            login_hint=f"add ODOO_LOGIN to the [{company}] or [DEFAULT] section of the .env",
         )
-        logger.info(f"Created Odoo client for company: {company}")
+        client.mode = config['mode']
+        odoo_clients[key] = client
+        logger.info(f"Created Odoo client for {company} ({config['database']}, {config['mode']})")
 
-    return odoo_clients[company]
+    return client
 
 
 def list_available_companies() -> list[str]:
@@ -715,7 +889,13 @@ def _describe_connection(headers, grant: Optional[bmya.Grant], mode: Optional[st
         )
 
     companies = list_available_companies()
-    return f"Available companies: {', '.join(companies)}\n\nTotal: {len(companies)}"
+    text = f"Available companies: {', '.join(companies)}\n\nTotal: {len(companies)}"
+    if company_defaults.get('url') and company_defaults.get('api_key'):
+        text += (
+            f"\n\nAny other database on {company_defaults['url']} can be used by passing "
+            "its name as 'company' (see odoo_list_databases)."
+        )
+    return text
 
 
 def _describe_api(url: str, pinned: str) -> str:
@@ -726,6 +906,23 @@ def _describe_api(url: str, pinned: str) -> str:
     if serie is None:
         return f"{api} (version detection failed; assumed)"
     return f"{api} (detected: Odoo {serie})"
+
+
+# Shared by every tool that talks to one database.
+COMPANY_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Optional. Which Odoo database to use (stdio/local mode): a section name from "
+        "the server config file, or -- when its [DEFAULT] section defines ODOO_URL and "
+        "ODOO_API_KEY -- any database name on that instance (e.g. "
+        "'odoo20e_demo_clientex'; see odoo_list_databases). In HTTP mode credentials "
+        "come from the connection headers and this is ignored."
+    ),
+}
+
+# Tools that manage databases on the configured instance. Local (stdio) only:
+# they need the instance's master password, which no HTTP tenant may use.
+LOCAL_TOOLS = frozenset({"odoo_list_databases", "odoo_duplicate_database"})
 
 
 def _all_tools() -> list[Tool]:
@@ -745,10 +942,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env sections (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name (e.g., 'res.partner', 'account.move', 'product.product')"
@@ -785,10 +979,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name (e.g., 'res.partner', 'account.move')"
@@ -821,10 +1012,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name"
@@ -848,10 +1036,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name"
@@ -871,10 +1056,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name"
@@ -906,10 +1088,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name"
@@ -934,10 +1113,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name"
@@ -957,10 +1133,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "filter": {
                         "type": "string",
                         "description": "Optional text to match against model technical name or label (case-insensitive). Omit to list all models."
@@ -979,10 +1152,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name to introspect (e.g., 'res.partner')"
@@ -1002,10 +1172,7 @@ def _all_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name to search (e.g., 'res.partner')"
@@ -1028,16 +1195,14 @@ def _all_tools() -> list[Tool]:
                 "Invoke an Odoo business method (workflow action) on a model, e.g. post an "
                 "invoice or confirm a sale order. For safety, only methods present in the "
                 "allowlist are accepted (configure it with the ODOO_MCP_ALLOWED_METHODS env "
-                "var, comma-separated 'model.method' pairs). Counts as a write operation, so "
+                "var, comma-separated 'model.method' pairs; on a local server '*' or "
+                "'sale.order.*' style wildcards are accepted). Counts as a write operation, so "
                 "it is blocked when ODOO_MCP_READONLY is enabled."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "company": {
-                        "type": "string",
-                        "description": "Optional. Company configuration name from the server .env (stdio/local mode). In HTTP mode credentials come from the X-Odoo-* connection headers and this is ignored."
-                    },
+                    "company": COMPANY_PROPERTY,
                     "model": {
                         "type": "string",
                         "description": "The Odoo model name (e.g., 'account.move', 'sale.order')"
@@ -1058,6 +1223,54 @@ def _all_tools() -> list[Tool]:
                 },
                 "required": ["model", "method"]
             }
+        ),
+        Tool(
+            name="odoo_list_databases",
+            description=(
+                "List the configured sections (name, database, mode) and the databases each "
+                "configured Odoo instance offers. Any listed database on the [DEFAULT] "
+                "instance can be passed directly as 'company' to the other tools."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "company": {
+                        "type": "string",
+                        "description": "Optional. Only list the instance of this section or database."
+                    }
+                },
+                "required": []
+            }
+        ),
+        Tool(
+            name="odoo_duplicate_database",
+            description=(
+                "Create a new Odoo database as a copy of an existing one (e.g. a template "
+                "such as 'odoo20e_template_cl'), including its users and API keys, so the "
+                "copy is usable right away with company=<target>. Needs ODOO_MASTER_PASSWORD "
+                "in the config. Can take minutes on large databases."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "Database to copy: a section name or a database name."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "Name of the new database. Letters, digits, '_', '-' and '.'; it "
+                            "must match the instance's dbfilter (e.g. start with 'odoo20e_')."
+                        )
+                    },
+                    "neutralize": {
+                        "type": "boolean",
+                        "description": "Neutralize the copy (disable crons, mail servers, payment providers...). Default false."
+                    }
+                },
+                "required": ["source", "target"]
+            }
         )
     ]
 
@@ -1072,6 +1285,8 @@ async def list_tools() -> list[Tool]:
     """
     tools = _all_tools()
     headers = _request_headers()
+    if headers is not None or MCP_TRANSPORT == "http":
+        tools = [tool for tool in tools if tool.name not in LOCAL_TOOLS]
     if headers is None or not bmya.BMYA_AUTH_ENABLED:
         return tools
 
@@ -1191,6 +1406,13 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
                 text=_describe_connection(headers, grant, mode),
             )]
 
+        if name in LOCAL_TOOLS:
+            if headers is not None or MCP_TRANSPORT == "http":
+                return [TextContent(type="text", text=(
+                    f"Error: {name} is only available on a local (stdio) server."
+                ))]
+            return _dispatch_local_tool(name, arguments)
+
         if grant is not None:
             bmya.authorize_tool(
                 name,
@@ -1212,6 +1434,13 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
 
         # Credentials come from the grant (HTTP) or from the 'company' .env section.
         client = resolve_odoo_client(arguments, grant=grant)
+
+        # Per-section ODOO_MODE=readonly, e.g. to keep a demo template pristine.
+        if grant is None and name in bmya.WRITE_TOOLS and client.mode == bmya.MODE_RO:
+            return [TextContent(type="text", text=(
+                f"Error: '{arguments.get('company')}' is configured read-only "
+                "(ODOO_MODE=readonly in its config section): write operations are disabled."
+            ))]
         bmya.log_audit(grant=grant, tool=name, mode=mode, decision="allowed")
 
         if name == "odoo_search_read":
@@ -1329,7 +1558,7 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
             key = f"{model}.{method}"
             # With a grant, authorize_tool already checked this against the
             # grant's list intersected with the server's.
-            if grant is None and key not in ODOO_ALLOWED_METHODS:
+            if grant is None and not _method_allowed(key, ODOO_ALLOWED_METHODS):
                 allowed = ", ".join(sorted(ODOO_ALLOWED_METHODS)) or "(none)"
                 return [TextContent(type="text", text=(
                     f"Error: Method '{key}' is not allowed. To enable it, add it to the "
@@ -1375,6 +1604,129 @@ async def _dispatch_tool(name: str, arguments: Any) -> list[TextContent]:
         # still surfaced verbatim; exc_info keeps the traceback in the log.
         logger.error(f"Error executing tool {name}: {e}", exc_info=True)
         return [TextContent(type="text", text=f"Error: {str(e)}")]
+
+
+def _method_allowed(key: str, allowed) -> bool:
+    """Allowlist match with shell-style wildcards: '*' or 'sale.order.*'."""
+    return key in allowed or any(fnmatch.fnmatchcase(key, pattern) for pattern in allowed)
+
+
+# What Odoo accepts as a database name (odoo.modules.db.DB_NAME_RE).
+_DB_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]+$")
+
+
+def _dispatch_local_tool(name: str, arguments: dict) -> list[TextContent]:
+    """odoo_list_databases / odoo_duplicate_database (stdio only)."""
+    if name == "odoo_list_databases":
+        return [TextContent(type="text", text=_describe_databases(arguments.get("company")))]
+
+    if READ_ONLY:
+        return [TextContent(
+            type="text",
+            text="Error: Server in read-only mode: database duplication is disabled (ODOO_MCP_READONLY)"
+        )]
+    return [TextContent(type="text", text=_duplicate_database(
+        arguments["source"],
+        arguments["target"],
+        neutralize=bool(arguments.get("neutralize", False)),
+    ))]
+
+
+def _describe_databases(company: Optional[str]) -> str:
+    configs = load_company_configs()
+    if company:
+        urls = [resolve_company_config(company)['url']]
+    else:
+        urls = [entry['url'] for entry in configs.values()]
+        if company_defaults.get('url'):
+            urls.append(company_defaults['url'])
+
+    lines = ["Configured sections:"]
+    lines += [
+        f"  {section}: {entry['database']} @ {entry['url']} ({entry['mode']})"
+        for section, entry in configs.items()
+    ] or ["  (none)"]
+    if company_defaults.get('url') and company_defaults.get('api_key'):
+        lines.append(
+            f"Any other database on {company_defaults['url']} is usable by name as "
+            f"'company' ({company_defaults['mode']})."
+        )
+
+    for url in dict.fromkeys(url.rstrip("/") for url in urls):
+        databases = list_instance_databases(url, fresh=True)
+        lines.append("")
+        if databases is None:
+            lines.append(f"Databases on {url}: (not listed: instance unreachable or list_db disabled)")
+        else:
+            lines.append(f"Databases on {url} ({len(databases)}):")
+            lines += [f"  {database}" for database in databases]
+    return "\n".join(lines)
+
+
+def _odoo_error_text(response: requests.Response) -> str:
+    """The message of an Odoo database-manager error page, else the status."""
+    match = re.search(r'class="alert alert-danger[^"]*"[^>]*>(.*?)</div>', response.text or "", re.S)
+    if match:
+        text = re.sub(r"<[^>]+>", " ", match.group(1))
+        return " ".join(text.split())[:500]
+    return f"HTTP {response.status_code}"
+
+
+def _duplicate_database(source: str, target: str, *, neutralize: bool) -> str:
+    """Copy ``source`` to a new database ``target`` on the source's instance.
+
+    Goes through /web/database/duplicate (17 to 20; 20 no longer has the 'db'
+    JSON-RPC service). A plain requests.post on purpose, outside the client's
+    retry adapter: a retried POST after a timeout or a 500 would start a second
+    copy of a database that may already be half made.
+    """
+    config = resolve_company_config(source)
+    url = config['url'].rstrip("/")
+    source_db = config['database']
+
+    if not _DB_NAME_RE.fullmatch(target):
+        return (
+            f"Error: '{target}' is not a valid database name: use letters, digits, "
+            "'_', '-' and '.', starting with a letter or digit."
+        )
+    if not config.get('master_password'):
+        return (
+            "Error: no master password configured. Set ODOO_MASTER_PASSWORD in the "
+            "[DEFAULT] section of the config (the admin_passwd of the Odoo server)."
+        )
+    existing = list_instance_databases(url, fresh=True)
+    if existing is not None and target in existing:
+        return f"Error: database '{target}' already exists on {url}."
+
+    logger.info(f"Duplicating {source_db} into {target} on {url}")
+    response = requests.post(
+        f"{url}/web/database/duplicate",
+        data={
+            "master_pwd": config['master_password'],
+            "name": source_db,
+            "new_name": target,
+            "neutralize_database": "true" if neutralize else "false",
+        },
+        timeout=ODOO_DB_OPERATION_TIMEOUT,
+        allow_redirects=False,
+    )
+    # Success is a redirect back to the database manager; a failure re-renders
+    # the manager page (or an error page) with the reason.
+    if not response.is_redirect:
+        return f"Error: Odoo refused to duplicate '{source_db}' into '{target}': {_odoo_error_text(response)}"
+
+    databases = list_instance_databases(url, fresh=True)
+    if databases is not None and target not in databases:
+        return (
+            f"Database '{target}' was created from '{source_db}', but {url} does not list "
+            "it: its name probably does not match the instance's dbfilter, so requests "
+            "cannot reach it. Use a name the dbfilter accepts."
+        )
+    return (
+        f"Database '{target}' created from '{source_db}' on {url}"
+        f"{' (neutralized)' if neutralize else ''}. It keeps the source's users and API "
+        f"keys: pass company='{target}' to the other tools."
+    )
 
 
 async def run_stdio():

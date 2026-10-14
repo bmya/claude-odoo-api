@@ -64,3 +64,6 @@ salida.json
 # Only the .example variants are tracked.
 deploy/config/
 deploy/.env
+
+# Local MCP config (holds the API key and master password)
+local/odoo.env
