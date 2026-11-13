@@ -32,7 +32,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
 
@@ -803,6 +803,21 @@ def check_credit(grant: Grant, tool: str) -> None:
 
 BMYA_USAGE_DIR = os.getenv("BMYA_USAGE_DIR", "").strip()
 
+# Since the journal records *which* models and fields a key read, it is also the
+# access trail for personal data, and an access trail needs a stated retention.
+# 365 days matches the 12-month retention committed for security logs. Zero or
+# a negative value disables pruning (keep forever), which must be a decision.
+try:
+    BMYA_USAGE_RETENTION_DAYS = int(os.getenv("BMYA_USAGE_RETENTION_DAYS", "365").strip() or "365")
+except ValueError:
+    BMYA_USAGE_RETENTION_DAYS = 365
+
+# The day the journal was last pruned. Pruning runs once, on the first write of
+# each UTC day: a listdir of a few hundred names, so it can live on the write
+# path without a scheduler, and the MCP server is the one service that mounts
+# the journal writable.
+_usage_pruned_day: Optional[str] = None
+
 _usage_warned_at = 0.0
 
 
@@ -825,6 +840,7 @@ def record_usage(
     rows: Optional[int] = None,
     ms: Optional[float] = None,
     err_class: str = "",
+    scope: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Append one JSON line describing a tool call.
 
@@ -834,6 +850,12 @@ def record_usage(
     ``err_class`` is the exception *class name* only. The messages carry Odoo
     data (record values, field names, database contents) and this file is not
     the place for them -- the same reason log_audit never logs a key.
+
+    ``scope`` says *what* was touched: model, requested fields, the field names
+    a filter used, the method, how many ids. Names only, never values -- a
+    filter value is often the personal data itself (a name, an email, a RUT).
+    Only the keys in ``USAGE_SCOPE_KEYS`` are kept, so a caller cannot widen
+    what lands in the file by passing more.
     """
     if not BMYA_USAGE_DIR:
         return
@@ -852,11 +874,58 @@ def record_usage(
             "ms": round(ms, 1) if ms is not None else None,
             "err_class": err_class or None,
         }
+        for key in USAGE_SCOPE_KEYS:
+            if scope and scope.get(key) is not None:
+                record[key] = scope[key]
         os.makedirs(BMYA_USAGE_DIR, exist_ok=True)
+        _prune_usage_once_a_day(day)
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as exc:  # noqa: BLE001
         _usage_warn("Could not write the usage record", exc)
+
+
+USAGE_SCOPE_KEYS = ("model", "fields", "filter_fields", "method", "ids_count")
+
+
+def prune_usage(usage_dir: str, keep_days: int) -> list:
+    """Delete journal files older than ``keep_days`` days. Returns what it removed.
+
+    Only names that parse as ``YYYY-MM-DD.jsonl`` are candidates, so a stray
+    file in the directory is never deleted. ``keep_days <= 0`` keeps everything.
+    """
+    if keep_days <= 0 or not usage_dir or not os.path.isdir(usage_dir):
+        return []
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=keep_days)
+    removed = []
+    for name in sorted(os.listdir(usage_dir)):
+        if not name.endswith(".jsonl"):
+            continue
+        try:
+            day = datetime.strptime(name[: -len(".jsonl")], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if day < cutoff:
+            try:
+                os.unlink(os.path.join(usage_dir, name))
+                removed.append(name)
+            except OSError as exc:
+                logger.warning("Could not prune usage file %s: %s", name, exc)
+    return removed
+
+
+def _prune_usage_once_a_day(day: str) -> None:
+    """Prune on the first write of each UTC day. Never raises."""
+    global _usage_pruned_day
+    if _usage_pruned_day == day:
+        return
+    _usage_pruned_day = day
+    try:
+        removed = prune_usage(BMYA_USAGE_DIR, BMYA_USAGE_RETENTION_DAYS)
+        if removed:
+            logger.info("Pruned %d usage file(s) older than %d days", len(removed), BMYA_USAGE_RETENTION_DAYS)
+    except Exception as exc:  # noqa: BLE001
+        _usage_warn("Could not prune the usage journal", exc)
 
 
 def log_audit(

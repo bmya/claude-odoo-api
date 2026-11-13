@@ -344,3 +344,158 @@ class TestUsageView:
 
         empty = client.get("/usage", params={"database": "no_such_db"}).text
         assert "Sin llamadas para" in empty
+
+
+class TestUsageScope:
+    """The journal is also the access trail for personal data: it has to say
+    which model and fields were read, and it must never hold a value."""
+
+    def _scope(self, name, arguments):
+        from odoo_mcp_server import _usage_scope
+
+        return _usage_scope(name, arguments)
+
+    def test_search_read_records_model_fields_and_filter_field_names(self):
+        scope = self._scope("odoo_search_read", {
+            "model": "res.partner",
+            "fields": ["name", "email", "name"],
+            "domain": ["|", ["email", "=", "juan.perez@cliente.cl"], ["vat", "ilike", "12345678-9"]],
+        })
+        assert scope == {
+            "model": "res.partner",
+            "fields": ["name", "email"],
+            "filter_fields": ["email", "vat"],
+        }
+
+    def test_filter_values_never_reach_the_journal(self, usage_dir):
+        from odoo_mcp_server import _usage_scope
+
+        arguments = {
+            "model": "res.partner",
+            "domain": [["name", "ilike", "Juan Pérez"], ["vat", "=", "12345678-9"]],
+        }
+        bmya_auth.record_usage(
+            grant=None, tool="odoo_search_read", mode="readonly", decision="allowed",
+            ok=True, scope=_usage_scope("odoo_search_read", arguments),
+        )
+        raw = _today_file(usage_dir).read_text()
+        assert "Juan" not in raw
+        assert "12345678" not in raw
+        record = _records(usage_dir)[0]
+        assert record["model"] == "res.partner"
+        assert record["filter_fields"] == ["name", "vat"]
+
+    def test_name_search_records_the_model_but_not_the_text(self):
+        scope = self._scope("odoo_name_search", {"model": "res.partner", "name": "Juan Pérez"})
+        assert scope == {"model": "res.partner"}
+
+    def test_read_without_fields_leaves_fields_unset(self):
+        scope = self._scope("odoo_read", {"model": "hr.employee", "ids": [1, 2, 3]})
+        assert scope["fields"] is None
+        assert scope["ids_count"] == 3
+
+    def test_write_records_field_names_not_values(self):
+        scope = self._scope("odoo_write", {
+            "model": "res.partner", "ids": [7], "values": {"email": "nuevo@cliente.cl"},
+        })
+        assert scope["fields"] == ["email"]
+        assert "nuevo@cliente.cl" not in json.dumps(scope)
+
+    def test_create_with_values_list_records_the_union_of_field_names(self):
+        scope = self._scope("odoo_create", {
+            "model": "res.partner",
+            "values_list": [{"name": "A"}, {"name": "B", "email": "b@x.cl"}],
+        })
+        assert scope["fields"] == ["name", "email"]
+
+    def test_call_method_records_the_method(self):
+        scope = self._scope("odoo_call_method", {
+            "model": "account.move", "method": "action_post", "ids": [10, 11],
+        })
+        assert scope["method"] == "action_post"
+        assert scope["ids_count"] == 2
+
+    def test_malformed_arguments_never_raise(self):
+        assert self._scope("odoo_search_read", None) == {}
+        scope = self._scope("odoo_search_read", {"model": 5, "fields": "name", "domain": "x"})
+        assert scope == {"model": None, "fields": None, "filter_fields": None}
+
+    def test_only_known_scope_keys_are_written(self, usage_dir):
+        bmya_auth.record_usage(
+            grant=None, tool="odoo_read", mode="readonly", decision="allowed",
+            scope={"model": "res.partner", "values": {"email": "x@y.cl"}},
+        )
+        record = _records(usage_dir)[0]
+        assert record["model"] == "res.partner"
+        assert "values" not in record
+
+    def test_absent_scope_keys_are_omitted_not_null(self, usage_dir):
+        bmya_auth.record_usage(
+            grant=None, tool="odoo_list_models", mode="readonly", decision="allowed",
+            scope={"model": None},
+        )
+        assert "model" not in _records(usage_dir)[0]
+
+
+class TestUsageRetention:
+    def _write(self, directory, day):
+        (directory / f"{day}.jsonl").write_text('{"key_id": "k"}\n')
+
+    def _day(self, days_ago):
+        return (datetime.now(timezone.utc).date() - timedelta(days=days_ago)).isoformat()
+
+    def test_first_write_of_the_day_prunes_past_retention(self, usage_dir, monkeypatch):
+        monkeypatch.setattr(bmya_auth, "BMYA_USAGE_RETENTION_DAYS", 365)
+        monkeypatch.setattr(bmya_auth, "_usage_pruned_day", None)
+        self._write(usage_dir, self._day(400))
+        self._write(usage_dir, self._day(300))
+        (usage_dir / "no-es-una-fecha.jsonl").write_text("{}")
+
+        bmya_auth.record_usage(grant=None, tool="odoo_read", mode=None, decision="allowed")
+
+        assert not (usage_dir / f"{self._day(400)}.jsonl").exists()
+        assert (usage_dir / f"{self._day(300)}.jsonl").exists()
+        assert (usage_dir / "no-es-una-fecha.jsonl").exists()
+
+    def test_prunes_only_once_a_day(self, usage_dir, monkeypatch):
+        monkeypatch.setattr(bmya_auth, "BMYA_USAGE_RETENTION_DAYS", 30)
+        monkeypatch.setattr(bmya_auth, "_usage_pruned_day", None)
+        bmya_auth.record_usage(grant=None, tool="odoo_read", mode=None, decision="allowed")
+        self._write(usage_dir, self._day(40))
+
+        bmya_auth.record_usage(grant=None, tool="odoo_read", mode=None, decision="allowed")
+
+        assert (usage_dir / f"{self._day(40)}.jsonl").exists()
+
+    def test_zero_retention_keeps_everything(self, usage_dir, monkeypatch):
+        monkeypatch.setattr(bmya_auth, "BMYA_USAGE_RETENTION_DAYS", 0)
+        monkeypatch.setattr(bmya_auth, "_usage_pruned_day", None)
+        self._write(usage_dir, self._day(4000))
+
+        bmya_auth.record_usage(grant=None, tool="odoo_read", mode=None, decision="allowed")
+
+        assert (usage_dir / f"{self._day(4000)}.jsonl").exists()
+
+
+class TestCallToolJournalsScope:
+    def test_a_tool_call_journals_its_model_and_fields(self, usage_dir, monkeypatch):
+        import asyncio
+
+        import odoo_mcp_server
+        from mcp.types import TextContent
+
+        async def fake_dispatch(name, arguments):
+            return [TextContent(type="text", text=json.dumps([{"id": 1}]))]
+
+        monkeypatch.setattr(odoo_mcp_server, "_dispatch_tool", fake_dispatch)
+        asyncio.run(odoo_mcp_server.call_tool(
+            "odoo_search_read",
+            {"model": "account.move.line", "fields": ["name", "balance"],
+             "domain": [["partner_id.name", "ilike", "Juan"]]},
+        ))
+
+        record = _records(usage_dir)[0]
+        assert record["model"] == "account.move.line"
+        assert record["fields"] == ["name", "balance"]
+        assert record["filter_fields"] == ["partner_id.name"]
+        assert "Juan" not in _today_file(usage_dir).read_text()

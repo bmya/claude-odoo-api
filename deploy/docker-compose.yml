@@ -45,6 +45,9 @@ services:
       # the built-in defaults (calendar.event.action_sync_timesheets,
       # account.move.action_post, sale.order.action_confirm).
       BMYA_USAGE_DIR: /app/var/usage
+      # Retención de la bitácora de uso (también registro de acceso a datos
+      # personales). 365 = 12 meses comprometidos para bitácoras; 0 = sin purga.
+      BMYA_USAGE_RETENTION_DAYS: "365"
       ODOO_REQUEST_TIMEOUT: "30"
       ODOO_MAX_RETRIES: "3"
     read_only: true

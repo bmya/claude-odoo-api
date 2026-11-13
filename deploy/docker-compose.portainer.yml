@@ -49,6 +49,9 @@ services:
       BMYA_AUTH_ENABLED: "1"
       BMYA_API_KEYS_FILE: /app/config/bmya-api-keys.json
       BMYA_USAGE_DIR: /app/var/usage
+      # Retención de la bitácora de uso (también registro de acceso a datos
+      # personales). 365 = 12 meses comprometidos para bitácoras; 0 = sin purga.
+      BMYA_USAGE_RETENTION_DAYS: "365"
 
       # Instancias reales conocidas: bmya.cloud/.cl propias, .odoo.com para las
       # que corren en Odoo Online/Odoo.sh (ej. staging). Ajustar si sumás una

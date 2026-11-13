@@ -213,6 +213,15 @@ El servidor escribe una línea JSON por llamada a tool en el volumen
 reconstruir después, y sin él habría que ponerle precio a una llamada a ciegas.
 Escribirla nunca puede hacer fallar una llamada.
 
+Cada línea registra también **qué se tocó**: modelo, campos leídos o escritos,
+los nombres de los campos por los que se filtró, el método y la cantidad de ids.
+**Solo nombres, nunca valores**: el valor de un filtro (un nombre, un correo, un
+RUT) suele ser justamente el dato personal. Con eso la bitácora sirve además
+como registro de acceso a datos personales, y por eso tiene retención:
+`BMYA_USAGE_RETENTION_DAYS` (365 por defecto, `0` = sin purga). La aplica el
+servidor MCP —el único que monta el volumen con escritura— en la primera
+escritura de cada día UTC.
+
 ### Exponerla por Traefik, más adelante
 
 Sin cambios de código: una ruta en la configuración dinámica de Traefik hacia

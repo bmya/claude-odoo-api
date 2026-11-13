@@ -15,6 +15,8 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
+import bmya_auth
+
 logger = logging.getLogger("bmya-console.usage")
 
 
@@ -128,25 +130,8 @@ def summarize(usage_dir: str, days: int = 30, database: str = "") -> dict:
 def prune(usage_dir: str, keep_days: int) -> list:
     """Delete journal files older than ``keep_days``. Returns what it removed.
 
-    The console owns retention because it is the only one of the two services
-    with a writable view of anything -- and because the MCP server must not
-    spend time on housekeeping in the request path.
+    Retention is applied by the MCP server, the one service that mounts the
+    journal writable (``bmya_auth.prune_usage``, once a day). This stays as a
+    thin alias so there is one implementation, not two that can disagree.
     """
-    if not usage_dir or not os.path.isdir(usage_dir):
-        return []
-    cutoff = datetime.now(timezone.utc).date() - timedelta(days=keep_days)
-    removed = []
-    for name in os.listdir(usage_dir):
-        if not name.endswith(".jsonl"):
-            continue
-        try:
-            day = datetime.fromisoformat(name[: -len(".jsonl")]).date()
-        except ValueError:
-            continue
-        if day < cutoff:
-            try:
-                os.unlink(os.path.join(usage_dir, name))
-                removed.append(name)
-            except OSError as exc:
-                logger.warning("Could not prune %s: %s", name, exc)
-    return removed
+    return bmya_auth.prune_usage(usage_dir, keep_days)

@@ -1113,6 +1113,70 @@ def _count_rows(contents) -> Optional[int]:
     return len(parsed) if isinstance(parsed, list) else None
 
 
+_SCOPE_MAX_NAMES = 50
+
+
+def _names(value: Any) -> Optional[list]:
+    """A bounded, de-duplicated list of strings, or None when there are none."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    names = []
+    for item in value:
+        if isinstance(item, str) and item and item not in names:
+            names.append(item[:128])
+        if len(names) >= _SCOPE_MAX_NAMES:
+            break
+    return names or None
+
+
+def _filter_field_names(domain: Any) -> Optional[list]:
+    """The field names a domain filters on -- never the values compared against.
+
+    Leaves are ``[field, operator, value]``; the value is exactly what must not
+    be journaled (a searched name, email or RUT is the personal data itself).
+    Logical operators ('&', '|', '!') and anything malformed are skipped.
+    """
+    if not isinstance(domain, (list, tuple)):
+        return None
+    return _names([
+        leaf[0] for leaf in domain
+        if isinstance(leaf, (list, tuple)) and len(leaf) == 3 and isinstance(leaf[0], str)
+    ])
+
+
+def _usage_scope(name: str, arguments: Any) -> dict:
+    """What a tool call touched, for the usage journal: names only, no values.
+
+    ``fields`` absent on a read means the client did not narrow it, so Odoo
+    returned its default field set; the journal then carries no ``fields`` key.
+    """
+    if not isinstance(arguments, dict):
+        return {}
+    model = arguments.get("model")
+    scope = {"model": model[:128] if isinstance(model, str) and model else None}
+    if name in ("odoo_search_read", "odoo_read"):
+        scope["fields"] = _names(arguments.get("fields"))
+    if name in ("odoo_search_read", "odoo_search", "odoo_search_count"):
+        scope["filter_fields"] = _filter_field_names(arguments.get("domain"))
+    if name in ("odoo_read", "odoo_write", "odoo_unlink", "odoo_call_method"):
+        ids = arguments.get("ids")
+        if isinstance(ids, (list, tuple)):
+            scope["ids_count"] = len(ids)
+    if name == "odoo_write":
+        values = arguments.get("values")
+        scope["fields"] = _names(list(values)) if isinstance(values, dict) else None
+    if name == "odoo_create":
+        rows = arguments.get("values_list")
+        if not isinstance(rows, list):
+            rows = [arguments.get("values")]
+        written = [key for row in rows if isinstance(row, dict) for key in row]
+        scope["fields"] = _names(written)
+    if name == "odoo_call_method":
+        method = arguments.get("method")
+        scope["method"] = method[:128] if isinstance(method, str) and method else None
+    return scope
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Time and meter one tool call, then hand it to the real handler.
@@ -1163,6 +1227,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             rows=_count_rows(contents) if ok else None,
             ms=(time.time() - started) * 1000,
             err_class=err_class,
+            scope=_usage_scope(name, arguments),
         )
 
 
