@@ -522,3 +522,97 @@ class TestGuards:
         response = mint(client)
         assert response.status_code == 403
         assert not grants_of(console_settings)
+
+
+class TestEditModels:
+    """The model policy can change on a live key, readonly or not."""
+
+    def _edit(self, client, key_id, **fields):
+        data = {"csrf_token": csrf_from(client), "label": "x"}
+        data.update(fields)
+        return client.post(f"/grants/{key_id}/edit", data=data, follow_redirects=False)
+
+    def test_a_model_can_be_added_to_a_readwrite_key(self, logged_in_client, console_settings):
+        """The faa962 case: minted for projects and tasks, then milestones were needed."""
+        mint(logged_in_client, mode="readwrite",
+             models_mode="list", models_list="project.project\nproject.task")
+        key_id = grants_of(console_settings)[0]["key_id"]
+
+        response = self._edit(
+            logged_in_client, key_id, models_mode="list",
+            models_list="project.project\nproject.task\nproject.milestone",
+        )
+
+        assert response.status_code == 303
+        assert grants_of(console_settings)[0]["allowed_models"] == [
+            "project.project", "project.task", "project.milestone"
+        ]
+
+    def test_a_readonly_key_can_edit_models(self, logged_in_client, console_settings):
+        mint(logged_in_client)
+        key_id = grants_of(console_settings)[0]["key_id"]
+
+        response = self._edit(logged_in_client, key_id, models_mode="list",
+                              models_list="res.partner", denied_models="res.users")
+
+        assert response.status_code == 303
+        grant = grants_of(console_settings)[0]
+        assert grant["allowed_models"] == ["res.partner"]
+        assert grant["denied_models"] == ["res.users"]
+
+    def test_unrestricted_clears_the_list(self, logged_in_client, console_settings):
+        mint(logged_in_client, models_mode="list", models_list="res.partner")
+        key_id = grants_of(console_settings)[0]["key_id"]
+
+        self._edit(logged_in_client, key_id, models_mode="unrestricted", models_list="res.partner")
+
+        assert grants_of(console_settings)[0]["allowed_models"] is None
+
+    def test_list_with_an_empty_box_is_refused(self, logged_in_client, console_settings):
+        mint(logged_in_client)
+        key_id = grants_of(console_settings)[0]["key_id"]
+        before = open(console_settings.registry_file, "rb").read()
+
+        response = self._edit(logged_in_client, key_id, models_mode="list", models_list=" ")
+
+        assert response.status_code == 400
+        assert open(console_settings.registry_file, "rb").read() == before
+
+    def test_the_change_is_in_the_history(self, logged_in_client, console_settings):
+        mint(logged_in_client)
+        key_id = grants_of(console_settings)[0]["key_id"]
+
+        self._edit(logged_in_client, key_id, models_mode="list", models_list="res.partner")
+
+        page = logged_in_client.get(f"/grants/{key_id}").text
+        assert "modelos: permitidos [sin restricción], denegados [—] -&gt; permitidos [res.partner]" in page
+
+    def test_the_new_list_is_what_the_server_enforces(self, logged_in_client, console_settings):
+        plaintext = shown_key(mint(logged_in_client, mode="readwrite",
+                                   models_mode="list", models_list="project.task"))
+        key_id = grants_of(console_settings)[0]["key_id"]
+
+        self._edit(logged_in_client, key_id, models_mode="list",
+                   models_list="project.task\nproject.milestone")
+
+        grant = bmya_auth.resolve_grant({"x-bmya-api-key": plaintext})
+        assert grant.allowed_models == frozenset({"project.task", "project.milestone"})
+
+    def test_the_form_is_prefilled_with_the_current_policy(self, logged_in_client, console_settings):
+        mint(logged_in_client, models_mode="list", models_list="res.partner\nproject.task",
+             denied_models="res.users")
+        key_id = grants_of(console_settings)[0]["key_id"]
+
+        page = logged_in_client.get(f"/grants/{key_id}").text
+
+        assert 'name="models_mode" value="list" checked' in page
+        assert "res.partner\nproject.task</textarea>" in page
+        assert "res.users</textarea>" in page
+
+    def test_saving_without_models_mode_leaves_models_alone(self, logged_in_client, console_settings):
+        mint(logged_in_client, models_mode="list", models_list="res.partner")
+        key_id = grants_of(console_settings)[0]["key_id"]
+
+        self._edit(logged_in_client, key_id, notes="solo una nota")
+
+        assert grants_of(console_settings)[0]["allowed_models"] == ["res.partner"]

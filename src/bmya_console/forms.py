@@ -82,6 +82,35 @@ def describe_methods(allowed_methods) -> str:
     return ", ".join(allowed_methods)
 
 
+def parse_models(form) -> tuple:
+    """``(allowed_models, denied_models, errors)`` from the form.
+
+    Shared by minting and editing, so "sólo estos" with an empty box is the same
+    400 in both places, never a silent [] that denies every model.
+    """
+    errors = []
+    models_mode = (form.get("models_mode") or "unrestricted").strip()
+    allowed_models = None
+    if models_mode not in MODELS_MODES:
+        errors.append("Opción de modelos inválida.")
+    elif models_mode == "list":
+        allowed_models = _lines(form.get("models_list"))
+        if not allowed_models:
+            errors.append(
+                'Elegiste "sólo estos modelos" pero no listaste ninguno. '
+                'Si no querías restringir, elegí "sin restricción".'
+            )
+    denied_models = _lines(form.get("denied_models"))
+    return allowed_models, denied_models, errors
+
+
+def describe_models(allowed_models, denied_models) -> str:
+    """Human form of the model policy, for the edit history."""
+    allowed = "sin restricción" if allowed_models is None else (", ".join(allowed_models) or "ninguno")
+    denied = ", ".join(denied_models or []) or "—"
+    return f"permitidos [{allowed}], denegados [{denied}]"
+
+
 def parse_grant_form(form) -> tuple:
     """Build a registry entry from the submitted form.
 
@@ -120,19 +149,8 @@ def parse_grant_form(form) -> tuple:
         allowed_methods, method_errors = parse_methods(form)
         errors.extend(method_errors)
 
-    models_mode = (form.get("models_mode") or "unrestricted").strip()
-    allowed_models = None
-    if models_mode not in MODELS_MODES:
-        errors.append("Opción de modelos inválida.")
-    elif models_mode == "list":
-        allowed_models = _lines(form.get("models_list"))
-        if not allowed_models:
-            errors.append(
-                'Elegiste "sólo estos modelos" pero no listaste ninguno. '
-                'Si no querías restringir, elegí "sin restricción".'
-            )
-
-    denied_models = _lines(form.get("denied_models"))
+    allowed_models, denied_models, model_errors = parse_models(form)
+    errors.extend(model_errors)
 
     odoo_api = (form.get("odoo_api") or bmya_auth.ODOO_API_AUTO).strip()
     if odoo_api not in bmya_auth.ODOO_APIS:

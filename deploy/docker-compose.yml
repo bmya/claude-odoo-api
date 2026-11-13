@@ -26,8 +26,12 @@ services:
       # Bitácora de uso. Es el único path escribible del servidor: el resto del
       # filesystem sigue read_only, y el montaje de config sigue :ro.
       - "bmya-usage:/app/var/usage"
+      # Código desde el repo: un cambio en src/ sólo pide reiniciar.
+      - "../src:/app/src:ro"
+      - "../tools:/app/tools:ro"
     environment:
       <<: *bmya-url-policy
+      PYTHONDONTWRITEBYTECODE: "1"
       MCP_TRANSPORT: http
       MCP_HTTP_HOST: 0.0.0.0
       MCP_HTTP_PORT: "8080"
@@ -83,6 +87,8 @@ services:
       - "${BMYA_KEYS_HOST_DIR:-./config}:/app/config:rw"
       # La bitácora se lee, no se escribe, desde acá.
       - "bmya-usage:/app/var/usage:ro"
+      - "../src:/app/src:ro"
+      - "../tools:/app/tools:ro"
     user: "1000:1000"
     environment:
       <<: *bmya-url-policy

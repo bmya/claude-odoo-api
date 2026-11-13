@@ -222,6 +222,12 @@ como registro de acceso a datos personales, y por eso tiene retención:
 servidor MCP —el único que monta el volumen con escritura— en la primera
 escritura de cada día UTC.
 
+En la consola, `/usage` muestra además un resumen **por modelo** (llamadas,
+filas, keys, campos leídos, campos de filtro y lecturas sin indicar campos) y
+las últimas 200 llamadas. `/usage.csv` exporta todas las llamadas del período,
+con el mismo filtro de base, para entregarle a un cliente el informe de qué
+consultó el asistente. Ambas requieren sesión de operador.
+
 ### Exponerla por Traefik, más adelante
 
 Sin cambios de código: una ruta en la configuración dinámica de Traefik hacia
@@ -237,6 +243,32 @@ llevan la BMYA key y la API key de Odoo del usuario, y en HTTP plano viajan
 legibles para cualquiera en el camino. Para eso, setear `MCP_TLS_CERTFILE` y
 `MCP_TLS_KEYFILE` (el contenedor termina TLS él mismo) y apuntar el service de
 Traefik a `https://`.
+
+## Desplegar un cambio de código
+
+`src/` y `tools/` se montan `:ro` desde el clon (`/root/odoo-mcp`) en los dos
+contenedores, así que un cambio de código no pide reconstruir la imagen:
+
+```bash
+cd /root/odoo-mcp && git pull
+```
+
+```bash
+docker restart odoo-mcp-server bmya-console
+```
+
+(o "Restart" de cada contenedor en Portainer; basta reiniciar el que cambió).
+La imagen se reconstruye **sólo** si cambian `requirements*.txt` o
+`Dockerfile*`: ahí están las dependencias, y el código nuevo podría importar algo
+que la imagen vieja no trae. Los archivos del clon tienen que ser legibles por
+el uid 1000 (un `git clone` como root con umask 022 ya los deja así).
+
+Ojo con la rama: el contenedor corre lo que tenga checkout el clon, sin más
+control. `git branch --show-current` antes de reiniciar.
+
+En las keys, los modelos permitidos y denegados se editan desde el detalle de
+la key en la consola, sin revocarla; el cambio queda en el historial y el
+servidor lo toma en `BMYA_REGISTRY_TTL_SECONDS`.
 
 ## Operación
 

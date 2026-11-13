@@ -499,3 +499,94 @@ class TestCallToolJournalsScope:
         assert record["fields"] == ["name", "balance"]
         assert record["filter_fields"] == ["partner_id.name"]
         assert "Juan" not in _today_file(usage_dir).read_text()
+
+
+def _scoped_journal(tmp_path):
+    directory = tmp_path / "usage"
+    directory.mkdir()
+    today = datetime.now(timezone.utc).date().isoformat()
+    lines = [
+        {"ts": "2026-11-13T18:20:00", "key_id": "ded582", "database": "odoo18e_apv",
+         "tool": "odoo_search_read", "ok": True, "rows": 10, "model": "res.partner",
+         "fields": ["name", "email"], "filter_fields": ["vat"]},
+        {"ts": "2026-11-13T18:21:00", "key_id": "ded582", "database": "odoo18e_apv",
+         "tool": "odoo_read", "ok": True, "rows": 3, "model": "res.partner", "ids_count": 3},
+        {"ts": "2026-11-13T18:22:00", "key_id": "aaa111", "database": "clientex_prod",
+         "tool": "odoo_search_read", "ok": True, "rows": 7, "model": "hr.employee",
+         "fields": ["name"]},
+        {"ts": "2026-11-13T15:00:00", "key_id": "ded582", "database": "odoo18e_apv",
+         "tool": "odoo_search_read", "ok": True, "rows": 1},
+    ]
+    (directory / f"{today}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+    return directory
+
+
+def _client_for(console_settings, directory):
+    from starlette.testclient import TestClient
+
+    from bmya_console.app import build_console_app
+    from tests.conftest import CONSOLE_KEY, CONSOLE_OPERATOR
+
+    settings = type(console_settings)(**{**console_settings.__dict__, "usage_dir": str(directory)})
+    client = TestClient(build_console_app(settings))
+    client.post("/login", data={"email": CONSOLE_OPERATOR, "key": CONSOLE_KEY})
+    return client
+
+
+class TestUsageByModel:
+    def test_rolls_up_per_model(self, tmp_path):
+        summary = usage.summarize(str(_scoped_journal(tmp_path)), days=7)
+        partner = next(m for m in summary["by_model"] if m["model"] == "res.partner")
+        assert partner["calls"] == 2
+        assert partner["rows"] == 13
+        assert partner["keys"] == ["ded582"]
+        assert partner["fields"] == ["email", "name"]
+        assert partner["filter_fields"] == ["vat"]
+        assert partner["default_fields"] == 1
+
+    def test_counts_calls_journaled_before_scope_existed(self, tmp_path):
+        summary = usage.summarize(str(_scoped_journal(tmp_path)), days=7)
+        assert summary["unscoped"] == 1
+        assert summary["total"] == 4
+
+    def test_model_rollup_respects_the_database_filter(self, tmp_path):
+        summary = usage.summarize(str(_scoped_journal(tmp_path)), days=7, database="clientex_prod")
+        assert [m["model"] for m in summary["by_model"]] == ["hr.employee"]
+
+    def test_calls_are_newest_first_and_capped(self, tmp_path):
+        records = usage.calls(str(_scoped_journal(tmp_path)), days=7, limit=2)
+        assert [r["ts"] for r in records] == ["2026-11-13T18:22:00", "2026-11-13T18:21:00"]
+
+    def test_page_shows_models_and_recent_calls(self, console_settings, tmp_path):
+        client = _client_for(console_settings, _scoped_journal(tmp_path))
+        page = client.get("/usage", params={"days": 7}).text
+        assert "Por modelo" in page
+        assert "res.partner" in page
+        assert "hr.employee" in page
+        assert "Últimas llamadas" in page
+        assert "Exportar CSV" in page
+
+
+class TestUsageCsv:
+    def test_requires_a_session(self, console_client):
+        assert console_client.get("/usage.csv", follow_redirects=False).status_code == 302
+
+    def test_exports_every_call_for_one_database(self, console_settings, tmp_path):
+        client = _client_for(console_settings, _scoped_journal(tmp_path))
+        response = client.get("/usage.csv", params={"days": 7, "database": "odoo18e_apv"})
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/csv")
+        assert "uso-mcp-odoo18e_apv-7d-" in response.headers["content-disposition"]
+
+        import csv as _csv
+        rows = list(_csv.DictReader(response.text.splitlines()))
+        assert len(rows) == 3
+        assert {r["database"] for r in rows} == {"odoo18e_apv"}
+        first = rows[0]
+        assert first["model"] == "res.partner"
+        assert first["ids_count"] == "3"
+        assert any(r["fields"] == "name email" and r["filter_fields"] == "vat" for r in rows)
+
+    def test_neutralises_spreadsheet_formulas(self):
+        text = usage.to_csv([{"key_id": "k", "model": "=HYPERLINK(1)"}], {})
+        assert "'=HYPERLINK(1)" in text

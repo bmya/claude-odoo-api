@@ -10,6 +10,8 @@ Nothing bills on this yet. That is the point: the data has to already exist on
 the day the decision is made, because it cannot be reconstructed afterwards.
 """
 
+import csv
+import io
 import json
 import logging
 import os
@@ -73,6 +75,8 @@ def summarize(usage_dir: str, days: int = 30, database: str = "") -> dict:
     by_key = {}
     by_day = {}
     by_tool = {}
+    by_model = {}
+    unscoped = 0
     databases = set()
     total = 0
     refused = 0
@@ -112,6 +116,25 @@ def summarize(usage_dir: str, days: int = 30, database: str = "") -> dict:
         by_day[day] = by_day.get(day, 0) + 1
         by_tool[tool] = by_tool.get(tool, 0) + 1
 
+        model = record.get("model")
+        if not model:
+            unscoped += 1
+            continue
+        m = by_model.setdefault(
+            model,
+            {"model": model, "calls": 0, "rows": 0, "keys": set(),
+             "fields": set(), "filter_fields": set(), "default_fields": 0, "last_seen": None},
+        )
+        m["calls"] += 1
+        m["rows"] += record.get("rows") or 0
+        m["keys"].add(key_id)
+        m["fields"].update(_str_list(record.get("fields")))
+        m["filter_fields"].update(_str_list(record.get("filter_fields")))
+        if tool in READ_TOOLS and not record.get("fields"):
+            m["default_fields"] += 1
+        if record.get("ts") and (m["last_seen"] or "") < record["ts"]:
+            m["last_seen"] = record["ts"]
+
     for entry in by_key.values():
         entry["avg_ms"] = round(entry["ms"] / entry["calls"], 1) if entry["calls"] else 0.0
 
@@ -124,7 +147,73 @@ def summarize(usage_dir: str, days: int = 30, database: str = "") -> dict:
         "by_key": sorted(by_key.values(), key=lambda e: e["calls"], reverse=True),
         "by_day": sorted(by_day.items()),
         "by_tool": sorted(by_tool.items(), key=lambda kv: kv[1], reverse=True),
+        "by_model": sorted(
+            (
+                {**m, "keys": sorted(m["keys"]), "fields": sorted(m["fields"]),
+                 "filter_fields": sorted(m["filter_fields"])}
+                for m in by_model.values()
+            ),
+            key=lambda e: e["calls"],
+            reverse=True,
+        ),
+        # Calls journaled before the server recorded *what* was touched. Shown so
+        # an empty "by model" table is not mistaken for "nothing was read".
+        "unscoped": unscoped,
     }
+
+
+# Tools that read records and accept a ``fields`` argument. A call to one of
+# them with no ``fields`` got Odoo's default field set, which is worth flagging:
+# it is the least minimised way to read.
+READ_TOOLS = ("odoo_search_read", "odoo_read")
+
+CSV_COLUMNS = (
+    "ts", "key_id", "label", "database", "tool", "mode", "decision", "ok",
+    "rows", "model", "fields", "filter_fields", "method", "ids_count", "ms", "err_class",
+)
+
+
+def _str_list(value) -> list:
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+
+
+def calls(usage_dir: str, days: int = 30, database: str = "", limit: int = 0) -> list:
+    """The individual calls in the window, newest first, optionally for one database.
+
+    ``limit`` > 0 keeps only the newest ``limit``: the page shows a bounded
+    tail, the CSV export takes everything.
+    """
+    selected = [
+        record for record in read_records(usage_dir, days)
+        if not database or record.get("database") == database
+    ]
+    selected.sort(key=lambda r: r.get("ts") or "", reverse=True)
+    return selected[:limit] if limit > 0 else selected
+
+
+def _csv_cell(value) -> str:
+    """One CSV cell. Lists are joined with spaces; a leading formula character
+    is neutralised so the file is safe to open in a spreadsheet."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        value = " ".join(str(v) for v in value)
+    text = str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        text = "'" + text
+    return text
+
+
+def to_csv(records, labels: dict) -> str:
+    """The calls as CSV, one row per call, for handing an access report to a client."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(CSV_COLUMNS)
+    for record in records:
+        row = dict(record)
+        row["label"] = labels.get(record.get("key_id")) or ""
+        writer.writerow([_csv_cell(row.get(column)) for column in CSV_COLUMNS])
+    return buffer.getvalue()
 
 
 def prune(usage_dir: str, keep_days: int) -> list:

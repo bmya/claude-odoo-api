@@ -8,7 +8,9 @@
   · {{ summary.total }} llamadas, {{ summary.refused }} rechazadas.
   <a href="/usage?days=7{{ db_q }}">7 días</a> ·
   <a href="/usage?days=30{{ db_q }}">30</a> ·
-  <a href="/usage?days=90{{ db_q }}">90</a>
+  <a href="/usage?days=90{{ db_q }}">90</a> ·
+  <a href="/usage?days=365{{ db_q }}">365</a>
+  {% if summary.total %}· <a href="/usage.csv?days={{ summary.days }}{{ db_q }}">Exportar CSV</a>{% endif %}
 </p>
 
 {% if summary.databases %}
@@ -62,6 +64,58 @@
     Las filas se registran pero no se cobran: el cliente elige el <code>limit</code>, así que
     tarifar por fila castigaría una consulta eficiente frente a veinte chicas.
   </p>
+</div>
+
+<div class="card">
+  <h2>Por modelo</h2>
+  {% if summary.by_model %}
+  <div class="scroll"><table>
+    <tr><th>Modelo</th><th>Llamadas</th><th>Filas</th><th>Keys</th><th>Campos</th><th>Filtró por</th><th>Última</th></tr>
+    {% for row in summary.by_model %}
+    <tr>
+      <td><code>{{ row.model }}</code></td>
+      <td>{{ row.calls }}</td>
+      <td>{{ row.rows }}</td>
+      <td>{% for k in row["keys"] %}<a href="/grants/{{ k }}"><code>{{ k }}</code></a>{% if not loop.last %}, {% endif %}{% endfor %}</td>
+      <td>
+        {% if row.fields %}<code>{{ row.fields|join(", ") }}</code>{% endif %}
+        {% if row.default_fields %}<br><span class="error">{{ row.default_fields }} lectura(s) sin indicar campos</span>{% endif %}
+        {% if not row.fields and not row.default_fields %}—{% endif %}
+      </td>
+      <td>{% if row.filter_fields %}<code>{{ row.filter_fields|join(", ") }}</code>{% else %}—{% endif %}</td>
+      <td>{{ (row.last_seen or "—")[:19] }}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% endif %}
+  <p class="hint" style="margin-left:0">
+    Sólo nombres de modelos y campos, nunca valores: la bitácora no los guarda.
+    Una lectura sin indicar campos devolvió el conjunto por defecto de Odoo.
+    {% if summary.unscoped %}{{ summary.unscoped }} llamada(s) del período son anteriores al registro por modelo y no figuran aquí.{% endif %}
+  </p>
+</div>
+
+<div class="card">
+  <h2>Últimas llamadas</h2>
+  <div class="scroll"><table>
+    <tr><th>Fecha (UTC)</th><th>key_id</th><th>Base</th><th>Tool</th><th>Modelo</th><th>Campos</th><th>Filtró por</th><th>Filas</th><th>Resultado</th></tr>
+    {% for r in recent %}
+    <tr>
+      <td>{{ (r.ts or "—")[:19] }}</td>
+      <td><code>{{ r.key_id or "—" }}</code></td>
+      <td><code>{{ r.database or "—" }}</code></td>
+      <td><code>{{ r.tool or "—" }}</code>{% if r.method %} <code>{{ r.method }}</code>{% endif %}</td>
+      <td>{% if r.model %}<code>{{ r.model }}</code>{% else %}—{% endif %}</td>
+      <td>{% if r.fields %}<code>{{ r.fields|join(", ") }}</code>{% else %}—{% endif %}</td>
+      <td>{% if r.filter_fields %}<code>{{ r.filter_fields|join(", ") }}</code>{% else %}—{% endif %}</td>
+      <td>{{ r.rows if r.rows is not none else (r.ids_count if r.ids_count is not none else "—") }}</td>
+      <td>{% if r.ok %}ok{% else %}<span class="error">{{ r.decision or "error" }}</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% if recent|length >= recent_limit %}
+  <p class="hint" style="margin-left:0">Se muestran las últimas {{ recent_limit }}. El CSV trae todas las del período.</p>
+  {% endif %}
 </div>
 
 <div class="card">

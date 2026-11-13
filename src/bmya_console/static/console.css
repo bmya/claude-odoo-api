@@ -66,6 +66,7 @@ fieldset label.choice input { margin-top: .3rem; }
 .hint { color: var(--muted); font-size: .85em; display: block; margin-left: 1.5rem; }
 
 table { width: 100%; border-collapse: collapse; background: var(--card); }
+.scroll { overflow-x: auto; }
 th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); font-size: .92em; }
 th { color: var(--muted); font-weight: 600; }
 

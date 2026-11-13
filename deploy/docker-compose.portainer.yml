@@ -7,6 +7,10 @@
 # Para cambiar algo (ODOO_MCP_READONLY, la imagen, etc.): editalo directo acá
 # en el editor de stack de Portainer y "Update the stack".
 #
+# Despliegue de un cambio de código: `cd /root/odoo-mcp && git pull` y
+# reiniciar odoo-mcp-server y/o bmya-console (src/ y tools/ se montan desde el
+# clon). Reconstruir la imagen sólo si cambian requirements*.txt o Dockerfile*.
+#
 # Sin `build:` a propósito: no baja de ghcr.io (el paquete queda privado por
 # default hasta que lo hagas público en GitHub), se buildea localmente en este
 # mismo servidor con EXACTAMENTE este tag, para que Docker lo tome de la caché
@@ -40,7 +44,15 @@ services:
       # Bitácora de uso: una línea JSON por llamada a tool. El filesystem sigue
       # read_only y config sigue :ro; esto es lo único escribible.
       - "bmya-usage:/app/var/usage"
+      # Código desde el clon, no desde la imagen: para desplegar un cambio de
+      # código basta `git pull` en /root/odoo-mcp y reiniciar el contenedor.
+      # La imagen sólo se reconstruye si cambian requirements.txt o el
+      # Dockerfile. :ro -- el contenedor nunca escribe su propio código.
+      - "/root/odoo-mcp/src:/app/src:ro"
+      - "/root/odoo-mcp/tools:/app/tools:ro"
     environment:
+      # Con el código montado :ro, Python no puede escribir __pycache__.
+      PYTHONDONTWRITEBYTECODE: "1"
       MCP_TRANSPORT: http
       MCP_HTTP_HOST: 0.0.0.0
 
@@ -105,8 +117,13 @@ services:
       # al lado, y con el directorio de otro dueño falla la primera emisión.
       - "/root/odoo-mcp/deploy/config:/app/config:rw"
       - "bmya-usage:/app/var/usage:ro"
+      # Código desde el clon, igual que odoo-api (requirements-console.txt o
+      # Dockerfile.console cambiados = reconstruir la imagen).
+      - "/root/odoo-mcp/src:/app/src:ro"
+      - "/root/odoo-mcp/tools:/app/tools:ro"
     user: "1000:1000"
     environment:
+      PYTHONDONTWRITEBYTECODE: "1"
       BMYA_ALLOWED_URL_SUFFIXES: ".bmya.cloud,.bmya.cl,.odoo.com"
       BMYA_API_KEYS_FILE: /app/config/bmya-api-keys.json
       BMYA_KEYS_BACKEND: file

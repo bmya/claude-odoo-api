@@ -48,8 +48,8 @@
   <p class="muted">
     La URL, la base y el modo no se editan: cambiarlos reapunta una credencial que el cliente ya
     tiene, y pasar de lectura a escritura escalaría en silencio una key ya instalada.
-    Para eso, revocá y emití una nueva. En una key de lectura y escritura, los métodos sí se editan: cada cambio queda en el
-    historial con el antes y el después.
+    Para eso, revocá y emití una nueva. Los modelos permitidos y denegados sí se editan, y en una key de
+    lectura y escritura también los métodos: cada cambio queda en el historial con el antes y el después.
   </p>
   <form method="post" action="/grants/{{ grant.key_id }}/edit">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -64,6 +64,18 @@
       </select></label>
     <label>Expira<input type="date" name="expires_at" value="{{ (grant.expires_at or '')[:10] }}"></label>
     <label>Notas<textarea name="notes">{{ grant.notes or '' }}</textarea></label>
+    <fieldset>
+      <legend>Modelos alcanzables</legend>
+      <label class="choice"><input type="radio" name="models_mode" value="unrestricted" {% if grant.allowed_models is none %}checked{% endif %}>
+        <span><strong>Sin restricción</strong><span class="hint">Se guarda <code>null</code>.</span></span></label>
+      <label class="choice"><input type="radio" name="models_mode" value="list" {% if grant.allowed_models is not none %}checked{% endif %}>
+        <span><strong>Sólo estos</strong><span class="hint">Uno por línea.</span></span></label>
+      <textarea name="models_list" placeholder="res.partner">{{ (grant.allowed_models or [])|join("\n") }}</textarea>
+    </fieldset>
+    <label>Modelos denegados
+      <textarea name="denied_models" placeholder="res.users&#10;ir.config_parameter">{{ (grant.denied_models or [])|join("\n") }}</textarea>
+      <span class="hint">Se aplica último y gana siempre, incluso sobre la lista de permitidos.</span>
+    </label>
     {% if grant.mode == "readwrite" %}
     {% set mode_value = "inherit" if grant.allowed_methods is none else ("none" if not grant.allowed_methods else "list") %}
     {% with chosen = grant.allowed_methods or [] %}{% include "_methods_picker.html" %}{% endwith %}

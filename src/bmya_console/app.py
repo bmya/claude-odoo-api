@@ -12,7 +12,7 @@ import logging
 import os
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -60,6 +60,10 @@ def _grant_status(grant: dict, now=None) -> str:
     if days <= 30:
         return f"vence en {days} día(s)"
     return "activa"
+
+
+# How many individual calls the /usage page lists; the CSV export has no cap.
+USAGE_PAGE_CALLS = 200
 
 
 def build_console_app(settings: Settings = None) -> FastAPI:
@@ -468,6 +472,16 @@ def build_console_app(settings: Settings = None) -> FastAPI:
             allowed_methods, method_errors = forms.parse_methods(form)
             if method_errors:
                 return JSONResponse({"error": "; ".join(method_errors)}, status_code=400)
+        # Models are editable for every key, readonly included: they narrow
+        # reads as much as writes. Same rule as methods -- an absent
+        # models_mode leaves them untouched, and every change lands in the
+        # history with its before and after.
+        edit_models = "models_mode" in form
+        allowed_models = denied_models = None
+        if edit_models:
+            allowed_models, denied_models, model_errors = forms.parse_models(form)
+            if model_errors:
+                return JSONResponse({"error": "; ".join(model_errors)}, status_code=400)
         method_change = []
 
         class _NotFound(Exception):
@@ -505,6 +519,15 @@ def build_console_app(settings: Settings = None) -> FastAPI:
                             f"{forms.describe_methods(allowed_methods)}"
                         )
                     grant["allowed_methods"] = allowed_methods
+                if edit_models:
+                    before = (grant.get("allowed_models"), list(grant.get("denied_models") or []))
+                    if before != (allowed_models, denied_models):
+                        method_change.append(
+                            f"modelos: {forms.describe_models(*before)} -> "
+                            f"{forms.describe_models(allowed_models, denied_models)}"
+                        )
+                    grant["allowed_models"] = allowed_models
+                    grant["denied_models"] = denied_models
                 # Same last gate as minting: never write what the server would
                 # refuse to load.
                 problems = forms.validate_against_server_parser(grant)
@@ -577,9 +600,39 @@ def build_console_app(settings: Settings = None) -> FastAPI:
             return redirect
 
         days = max(1, min(int(days or 30), 365))
-        summary = usage.summarize(settings.usage_dir, days=days, database=database.strip())
+        database = database.strip()
+        summary = usage.summarize(settings.usage_dir, days=days, database=database)
+        recent = usage.calls(settings.usage_dir, days=days, database=database, limit=USAGE_PAGE_CALLS)
         labels = {g.get("key_id"): g.get("label") or "" for g in _load_grants()}
-        return render(request, "usage.html", summary=summary, labels=labels, days=days)
+        return render(
+            request, "usage.html", summary=summary, labels=labels, days=days,
+            recent=recent, recent_limit=USAGE_PAGE_CALLS,
+        )
+
+    @app.get("/usage.csv", include_in_schema=False)
+    def usage_csv(request: Request, days: int = 30, database: str = ""):
+        """Every call in the window as CSV: the access report a client's DPO asks for.
+
+        Same journal and same filters as /usage, with no row cap. It holds model
+        and field names, never values, because the journal never has them.
+        """
+        identity, redirect = _require_login(request)
+        if redirect:
+            return redirect
+
+        days = max(1, min(int(days or 30), 365))
+        database = database.strip()
+        records = usage.calls(settings.usage_dir, days=days, database=database)
+        labels = {g.get("key_id"): g.get("label") or "" for g in _load_grants()}
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
+        safe_db = "".join(c for c in database if c.isalnum() or c in "-_") or "todas"
+        filename = f"uso-mcp-{safe_db}-{days}d-{stamp}.csv"
+        logger.info("usage export by=%s database=%s days=%s rows=%d", identity, database or "*", days, len(records))
+        return Response(
+            usage.to_csv(records, labels),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get("/", include_in_schema=False)
     def index(request: Request):
